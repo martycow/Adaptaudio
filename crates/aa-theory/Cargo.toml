@@ -1,0 +1,13 @@
+[package]
+name = "aa-theory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aa-core.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

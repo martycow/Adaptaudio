@@ -1,0 +1,23 @@
+[package]
+name = "adaptaudio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aa-core.workspace = true
+aa-adaptive.workspace = true
+aa-engine.workspace = true
+aa-theory.workspace = true
+aa-puzzle.workspace = true
+aa-export.workspace = true
+aa-assistant.workspace = true
+aa-midi.workspace = true
+aa-capture.workspace = true
+rune.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

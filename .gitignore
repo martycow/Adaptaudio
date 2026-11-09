@@ -1,0 +1,5 @@
+/target
+*.aaproj/renders/
+Export/
+.DS_Store
+/*.wav

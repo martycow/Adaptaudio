@@ -1,0 +1,16 @@
+[package]
+name = "aa-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aa-core = { workspace = true }
+aa-midi = { workspace = true }
+cpal = { workspace = true }
+rtrb = { workspace = true }
+hound = { workspace = true }
+
+[lints]
+workspace = true

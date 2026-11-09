@@ -1,0 +1,4 @@
+[toolchain]
+# Rune pins this toolchain; keep ours in step when bumping the Rune revision.
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]

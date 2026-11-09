@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/aa-core",
+    "crates/aa-theory",
+    "crates/aa-adaptive",
+    "crates/aa-puzzle",
+    "crates/aa-engine",
+    "crates/aa-midi",
+    "crates/aa-capture",
+    "crates/aa-export",
+    "crates/aa-assistant",
+    "apps/adaptaudio",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+aa-core = { path = "crates/aa-core" }
+aa-theory = { path = "crates/aa-theory" }
+aa-adaptive = { path = "crates/aa-adaptive" }
+aa-puzzle = { path = "crates/aa-puzzle" }
+aa-engine = { path = "crates/aa-engine" }
+aa-midi = { path = "crates/aa-midi" }
+aa-capture = { path = "crates/aa-capture" }
+aa-export = { path = "crates/aa-export" }
+aa-assistant = { path = "crates/aa-assistant" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+cpal = "0.15"
+midir = "0.10"
+rtrb = "0.3"
+hound = "3.5"
+
+# Rune is pre-release: pinned to one revision of `dev`. Bump it only as a separate change.
+rune = { git = "https://github.com/anomalyco/rune", rev = "d751f07106eac47bdd4e33756dee71e1f593c9e2", features = ["native-file-dialog"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.dev]
+opt-level = 1
