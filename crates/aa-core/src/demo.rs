@@ -899,3 +899,37 @@ mod tests {
         assert_eq!(ids.len(), n);
     }
 }
+
+/// A project with Cedar Station's game modes, sections, events and scenarios, and no music yet:
+/// the starting point for a new piece.
+pub fn blank_station(name: &str) -> Project {
+    let mut p = cedar_station();
+    p.name = name.to_string();
+    p.tracks.clear();
+    p.puzzles.clear();
+    for section in &mut p.sections {
+        section.slots.clear();
+    }
+    for event in &mut p.events {
+        event.stinger = None;
+        event.unlock_track = None;
+    }
+    p
+}
+
+#[cfg(test)]
+mod blank_tests {
+    use super::*;
+
+    #[test]
+    fn a_blank_station_keeps_the_game_side_and_drops_the_music() {
+        let p = blank_station("New piece");
+        assert_eq!(p.name, "New piece");
+        assert!(p.tracks.is_empty());
+        assert_eq!(p.game_modes.len(), cedar_station().game_modes.len());
+        assert!(p.sections.iter().all(|s| s.slots.is_empty()));
+        assert!(p.events.iter().all(|e| e.stinger.is_none()));
+        let json = crate::io::to_json(&p).unwrap();
+        assert_eq!(crate::io::from_json(&json).unwrap(), p);
+    }
+}

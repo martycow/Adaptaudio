@@ -3,7 +3,10 @@
 use super::common::empty_state;
 use crate::state::App;
 use crate::theme::{self, font};
-use crate::widgets::{button, caps, knob, screen_header, segmented};
+use crate::widgets::{
+    body, button, caps, dropdown, field_row, knob, pill, screen_header, segmented, text_field,
+    vscroll,
+};
 use aa_core::{Adsr, FilterMode, Instrument, LfoTarget, SynthPatch, TrackId, TrackRole, Waveform};
 use aa_engine::Command;
 use rune::{Color, El, Shape, canvas, col, el, row, text};
@@ -11,45 +14,64 @@ use rune::{Color, El, Shape, canvas, col, el, row, text};
 pub fn view(s: &App, accent: Color) -> El {
     let head = screen_header(
         "Sound Lab",
-        "Shape how each note sounds. Hover any word to learn what it does.",
+        "Choose a track, shape its sound, and keep the sounds you like in the library to use anywhere.",
         accent,
     );
     let Some(track) = s.selected_track.and_then(|t| s.project.track(t)) else {
         return col().padding(22.0).gap(16.0).child(head).child(empty_state(
-            "No track selected",
-            "Pick a track on the Session screen.",
+            "This project has no tracks yet",
+            "Add a track on the Session screen, then come back to shape its sound.",
         ));
     };
     let tid = track.id;
     let ti = s.project.track_index(tid).unwrap_or(0);
-    let kinds = ["Synth", "Sampler", "External MIDI"];
+    let kinds = ["Built-in synth", "Sampler", "Hardware (MIDI)"];
     let current = match track.instrument {
         Instrument::Synth(_) => 0,
         Instrument::Sampler(_) => 1,
         Instrument::External(_) => 2,
     };
     let role = track.role;
+    let names: Vec<String> = s.project.tracks.iter().map(|t| t.name.clone()).collect();
+    let midi_out = s.settings.midi_out.clone().unwrap_or_default();
     let top = row()
         .gap(12.0)
         .items_center()
+        .child(text("Track").font(font::LABEL).color(theme::muted()))
         .child(
-            el().size(12.0, 12.0)
-                .radius(6.0)
+            el().size(10.0, 10.0)
+                .radius(5.0)
                 .fill(theme::role_color(track.role)),
         )
+        .child(dropdown(
+            s,
+            "sound-track",
+            &names,
+            Some(ti),
+            200.0,
+            |s: &mut App, i, _| {
+                if let Some(id) = s.project.tracks.get(i).map(|t| t.id) {
+                    s.select_clip(id, None);
+                    s.ext.confirm_delete = None;
+                }
+            },
+        ))
+        .child(el().w(8.0))
         .child(
-            text(track.name.clone())
-                .font(font::TITLE)
-                .color(theme::text()),
+            text("Plays through")
+                .font(font::LABEL)
+                .color(theme::muted()),
         )
-        .child(track_picker(s, accent))
-        .child(rune::spacer())
         .child(segmented(
             "ikind",
             &kinds,
             current,
             accent,
             move |s: &mut App, i| {
+                if i == current {
+                    return;
+                }
+                let port = midi_out.clone();
                 s.edit(|p| {
                     if let Some(t) = p.track_mut(tid) {
                         t.instrument = match i {
@@ -60,11 +82,7 @@ pub fn view(s: &App, accent: Color) -> El {
                                 amp_env: Adsr::new(0.002, 0.3, 1.0, 0.3),
                                 gain_db: 0.0,
                             }),
-                            _ => Instrument::External(aa_core::ExternalInstrument {
-                                port_name: s_midi_default(),
-                                channel: 1,
-                                latency_ms: 0.0,
-                            }),
+                            _ => Instrument::External(aa_midi::external_instrument_for(&port)),
                         };
                     }
                 });
@@ -72,16 +90,8 @@ pub fn view(s: &App, accent: Color) -> El {
         ));
     let body = match &track.instrument {
         Instrument::Synth(patch) => synth(tid, ti, role, patch, accent),
-        Instrument::Sampler(inst) => col()
-            .gap(10.0)
-            .child(caps(format!("{} · {} zones", inst.name, inst.zones.len())))
-            .child(crate::widgets::body("Sampler zones come from the Capture screen (record a hardware synth) or from WAV files in the project's samples folder."))
-            .children(inst.zones.iter().map(|z| text(format!("{}  {}–{}  root {}", z.path, aa_core::music::note_name(z.low_note), aa_core::music::note_name(z.high_note), aa_core::music::note_name(z.root_note))).font(font::SMALL.mono()).color(theme::muted()))),
-        Instrument::External(ext) => col()
-            .gap(10.0)
-            .child(caps("Hardware synth over MIDI"))
-            .child(text(format!("Port: {} · channel {} · latency {:.1} ms", if ext.port_name.is_empty() { "(none)" } else { &ext.port_name }, ext.channel, ext.latency_ms)).font(font::BODY).color(theme::text()))
-            .child(crate::widgets::body("Notes go to the synth live. To hear it in the game, record it into a sampler on the Capture screen.")),
+        Instrument::Sampler(inst) => sampler(inst),
+        Instrument::External(ext) => external(s, tid, ti, role, ext, accent),
     };
     col()
         .key("sound")
@@ -93,45 +103,317 @@ pub fn view(s: &App, accent: Color) -> El {
         .child(head)
         .child(top)
         .child(
-            col()
+            row()
                 .grow(1.0)
                 .min_h(0.0)
-                .scroll(rune::el::ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(body),
+                .gap(18.0)
+                .child(library(s, track, accent))
+                .child(
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .min_h(0.0)
+                        .gap(14.0)
+                        .child(vscroll(body))
+                        .child(keyboard(s, ti, accent)),
+                ),
         )
-        .child(keyboard(ti, accent))
 }
 
-fn s_midi_default() -> String {
-    String::new()
-}
-
-fn track_picker(s: &App, accent: Color) -> El {
-    let mut r = row().gap(4.0);
-    for t in &s.project.tracks {
-        let id = t.id;
-        let on = s.selected_track == Some(id);
-        r = r.child(
-            crate::widgets::pill(
-                format!("tp-{id}"),
-                t.name.clone(),
-                theme::role_color(t.role),
-                on,
+/// The left column: sounds to load into this track, and a way to keep the current one.
+fn library(s: &App, track: &aa_core::Track, accent: Color) -> El {
+    let tid = track.id;
+    let patch = match &track.instrument {
+        Instrument::Synth(p) => Some(p),
+        _ => None,
+    };
+    let mut c = col().gap(8.0);
+    c = c.child(caps("Keep this sound"));
+    match patch {
+        Some(patch) => {
+            c = c
+                .child(text_field(
+                    "sound-name",
+                    &s.ext.sound_name,
+                    &patch.name,
+                    228.0,
+                    |s: &mut App| &mut s.ext.sound_name,
+                ))
+                .child(
+                    button("sound-save", "Save to library", accent, true)
+                        .help("Saves this track's sound under the name above (or its current name)")
+                        .on_press(move |s: &mut App| save_sound(s, tid)),
+                );
+        }
+        None => {
+            c = c.child(body(
+                "Only built-in synth sounds go into the library. A sampler's recordings stay with its project.",
+            ));
+        }
+    }
+    c = c.child(caps("Your sounds").mt(10.0));
+    if s.ext.sounds.is_empty() {
+        c = c.child(body("Nothing saved yet."));
+    }
+    for (i, sound) in s.ext.sounds.iter().enumerate() {
+        let (load_path, delete_path) = (sound.path.clone(), sound.path.clone());
+        let confirming = s.ext.confirm_delete.as_ref() == Some(&sound.path);
+        let current = patch.is_some_and(|p| p.name == sound.name);
+        c = c.child(
+            row()
+                .gap(4.0)
+                .items_center()
+                .child(
+                    row()
+                        .key(format!("sound-load-{i}"))
+                        .role("button")
+                        .label(format!("Load {}", sound.name))
+                        .help("Load this sound into the track")
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .h(30.0)
+                        .px(10.0)
+                        .items_center()
+                        .radius(8.0)
+                        .fill(if current {
+                            accent.alpha(0.14)
+                        } else {
+                            theme::panel()
+                        })
+                        .hover(theme::hover())
+                        .on_press(move |s: &mut App| load_sound(s, tid, &load_path))
+                        .child(
+                            text(sound.name.clone())
+                                .font(font::LABEL)
+                                .color(theme::text())
+                                .truncate(),
+                        ),
+                )
+                .child(
+                    button(
+                        format!("sound-del-{i}"),
+                        if confirming { "Delete?" } else { "✕" },
+                        theme::danger(),
+                        confirming,
+                    )
+                    .help("Remove this sound from the library (asks once more)")
+                    .on_press(move |s: &mut App| delete_sound(s, &delete_path)),
+                ),
+        );
+    }
+    c = c.child(caps("Starting points").mt(10.0));
+    let mut presets = row().gap(4.0).flex_wrap();
+    for r in TrackRole::ALL {
+        presets = presets.child(
+            pill(
+                format!("pre-{}", r.name()),
+                r.name(),
+                theme::role_color(r),
+                false,
             )
+            .help(format!("A basic {} sound to start from", r.name()))
             .on_press(move |s: &mut App| {
-                let first = s
-                    .project
-                    .track(id)
-                    .and_then(|t| t.clips.first())
-                    .map(|c| c.id);
-                s.select_clip(id, first);
+                s.edit(|p| {
+                    if let Some(t) = p.track_mut(tid) {
+                        t.instrument = Instrument::Synth(SynthPatch::preset(r));
+                    }
+                })
             }),
         );
     }
-    let _ = accent;
-    row().min_w(0.0).max_w(640.0).scroll_x().child(r)
+    c = c.child(presets);
+    col()
+        .key("sound-library")
+        .w(260.0)
+        .h_full()
+        .min_h(0.0)
+        .radius(12.0)
+        .fill(theme::card())
+        .child(vscroll(c.padding(16.0)))
+}
+
+fn save_sound(s: &mut App, tid: TrackId) {
+    let Some(Instrument::Synth(patch)) = s.project.track(tid).map(|t| &t.instrument) else {
+        return;
+    };
+    let Some(dir) = crate::library::dir() else {
+        s.toast_error("No home folder to keep sounds in");
+        return;
+    };
+    let mut patch = patch.clone();
+    let typed = s.ext.sound_name.text.trim().to_string();
+    if !typed.is_empty() {
+        patch.name = typed;
+    }
+    match crate::library::save(&dir, &patch) {
+        Ok(saved) => {
+            // The track takes the saved name, so it is clear which library sound it uses.
+            let name = saved.name.clone();
+            patch_edit(s, tid, true, |p| p.name = name);
+            s.ext.sounds = crate::library::list(&dir);
+            s.ext.sound_name = rune::TextEdit::new("");
+            s.toast(&format!("Saved “{}” to the sound library", saved.name));
+        }
+        Err(e) => s.toast_error(&format!("Can't save the sound: {e}")),
+    }
+}
+
+fn load_sound(s: &mut App, tid: TrackId, path: &std::path::Path) {
+    match crate::library::load(path) {
+        Ok(patch) => {
+            let name = patch.name.clone();
+            s.edit(|p| {
+                if let Some(t) = p.track_mut(tid) {
+                    t.instrument = Instrument::Synth(patch);
+                }
+            });
+            s.ext.confirm_delete = None;
+            if let Some(ti) = s.project.track_index(tid) {
+                let pitch = s.project.tracks[ti].role.default_note();
+                s.send(Command::PreviewNote {
+                    track: ti,
+                    pitch,
+                    velocity: 0.9,
+                    seconds: 0.4,
+                });
+            }
+            s.toast(&format!("Loaded “{name}” (⌘Z brings the old sound back)"));
+        }
+        Err(e) => s.toast_error(&format!("Can't load the sound: {e}")),
+    }
+}
+
+fn delete_sound(s: &mut App, path: &std::path::Path) {
+    if s.ext.confirm_delete.as_deref() != Some(path) {
+        s.ext.confirm_delete = Some(path.to_path_buf());
+        return;
+    }
+    s.ext.confirm_delete = None;
+    match crate::library::delete(path) {
+        Ok(()) => {
+            if let Some(dir) = crate::library::dir() {
+                s.ext.sounds = crate::library::list(&dir);
+            }
+            s.toast("Removed from the sound library");
+        }
+        Err(e) => s.toast_error(&format!("Can't delete: {e}")),
+    }
+}
+
+fn sampler(inst: &aa_core::SamplerInstrument) -> El {
+    let mut c = crate::widgets::card()
+        .child(caps(format!("{} · {} recordings", inst.name, inst.zones.len())))
+        .child(body(
+            "A sampler plays recordings. Make them on the Capture screen: record a hardware synth, a groovebox or a microphone, and they land here.",
+        ));
+    for z in &inst.zones {
+        c = c.child(
+            text(format!(
+                "{}   {}–{}   root {}",
+                z.path,
+                aa_core::music::note_name(z.low_note),
+                aa_core::music::note_name(z.high_note),
+                aa_core::music::note_name(z.root_note)
+            ))
+            .font(font::SMALL.mono())
+            .color(theme::muted()),
+        );
+    }
+    c
+}
+
+/// A track that plays a hardware synth: where the notes go and a way to check they arrive.
+fn external(
+    s: &App,
+    tid: TrackId,
+    ti: usize,
+    role: TrackRole,
+    ext: &aa_core::ExternalInstrument,
+    accent: Color,
+) -> El {
+    let port = s.settings.midi_out.clone();
+    let connected = s.ext.capture.scheduler.is_some();
+    let status = match (&port, connected) {
+        (Some(p), true) => (format!("Connected to {p}"), theme::ok()),
+        (Some(p), false) => (format!("{p} is not connected"), theme::warn()),
+        (None, _) => ("No MIDI output chosen".to_string(), theme::warn()),
+    };
+    let outs = s.ext.devices.midi_out.clone();
+    let channels: Vec<String> = (1..=16).map(|c| format!("Channel {c}")).collect();
+    crate::widgets::card()
+        .child(caps("Hardware synth over MIDI"))
+        .child(
+            row()
+                .gap(8.0)
+                .items_center()
+                .child(el().size(8.0, 8.0).radius(4.0).fill(status.1))
+                .child(text(status.0).font(font::HEAD).color(theme::text())),
+        )
+        .child(field_row(
+            "MIDI output",
+            dropdown(
+                s,
+                "ext-port",
+                &outs,
+                port.as_ref().and_then(|p| outs.iter().position(|o| o == p)),
+                280.0,
+                |s: &mut App, i, _| {
+                    if let Some(name) = s.ext.devices.midi_out.get(i).cloned() {
+                        s.settings.midi_out = Some(name);
+                        let _ = s.settings.save();
+                        s.restart_audio();
+                    }
+                },
+            ),
+        ))
+        .child(field_row(
+            "MIDI channel",
+            dropdown(
+                s,
+                "ext-channel",
+                &channels,
+                Some(usize::from(ext.channel.clamp(1, 16)) - 1),
+                140.0,
+                move |s: &mut App, i, _| {
+                    s.edit(|p| {
+                        if let Some(Instrument::External(e)) =
+                            p.track_mut(tid).map(|t| &mut t.instrument)
+                        {
+                            e.channel = i as u8 + 1;
+                        }
+                    })
+                },
+            ),
+        ))
+        .child(
+            row()
+                .gap(10.0)
+                .items_center()
+                .child(
+                    button("ext-test", "♪ Send a test note", accent, true)
+                        .disabled(!connected)
+                        .on_press(move |s: &mut App| {
+                            s.send(Command::PreviewNote {
+                                track: ti,
+                                pitch: role.default_note().max(48),
+                                velocity: 0.8,
+                                seconds: 0.5,
+                            })
+                        }),
+                )
+                .child(
+                    text(format!("Latency {:.1} ms", ext.latency_ms))
+                        .font(font::LABEL)
+                        .color(theme::muted())
+                        .help("How early notes are sent so the synth lands on the beat. Measure it on the Capture screen."),
+                ),
+        )
+        .child(body(
+            "Prototype only: a hardware synth can't ship inside the game. When the part sounds right, record it into a sampler on the Capture screen, and it will export to FMOD.",
+        ))
+        .child(body(
+            "No sound? Check that the synth listens on the channel above, and that its audio reaches your interface.",
+        ))
 }
 
 /// Edits the selected track's synth patch.
@@ -417,54 +699,33 @@ fn synth(tid: TrackId, ti: usize, role: TrackRole, p: &SynthPatch, accent: Color
                     },
                 )),
         );
-    let presets = {
-        let mut r = row()
-            .gap(6.0)
-            .flex_wrap()
-            .child(caps("Start from"))
-            .items_center();
-        for r2 in TrackRole::ALL {
-            r = r.child(
-                crate::widgets::pill(
-                    format!("pre-{}", r2.name()),
-                    r2.name(),
-                    theme::role_color(r2),
-                    r2 == role,
-                )
-                .on_press(move |s: &mut App| {
-                    patch_edit(s, tid, true, |p| *p = SynthPatch::preset(r2))
-                }),
-            );
-        }
-        r.child(
-            button("mutate", "✦ Mutate", accent, true)
-                .help("Nudge every knob a little at random: new ideas, same character")
-                .on_press(move |s: &mut App| {
-                    s.ext.seed = s
-                        .ext
-                        .seed
-                        .wrapping_mul(2862933555777941757)
-                        .wrapping_add(3037000493);
-                    let seed = s.ext.seed;
-                    patch_edit(s, tid, true, |p| mutate(p, seed));
-                    s.send(Command::PreviewNote {
-                        track: ti,
-                        pitch: role.default_note(),
-                        velocity: 0.9,
-                        seconds: 0.4,
-                    });
-                }),
-        )
-    };
+    let mutate = button("mutate", "✦ Mutate", accent, false)
+        .help("Nudge every knob a little at random: new ideas, same character")
+        .on_press(move |s: &mut App| {
+            s.ext.seed = s
+                .ext
+                .seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            let seed = s.ext.seed;
+            patch_edit(s, tid, true, |p| mutate(p, seed));
+            s.send(Command::PreviewNote {
+                track: ti,
+                pitch: role.default_note(),
+                velocity: 0.9,
+                seconds: 0.4,
+            });
+        });
     col()
         .gap(14.0)
         .child(
             row()
                 .gap(8.0)
                 .items_center()
-                .child(text(p.name.clone()).font(font::HEAD).color(theme::text())),
+                .child(text(p.name.clone()).font(font::TITLE).color(theme::text()))
+                .child(rune::spacer())
+                .child(mutate),
         )
-        .child(presets)
         .child(
             row()
                 .gap(14.0)
@@ -557,8 +818,8 @@ fn adsr_preview(a: Adsr, accent: Color) -> El {
     .size(w, h)
 }
 
-/// One octave of keys that play the selected track.
-fn keyboard(ti: usize, accent: Color) -> El {
+/// Two octaves of keys that play the selected track, and whether a hardware keyboard is heard.
+fn keyboard(s: &App, ti: usize, accent: Color) -> El {
     let mut r = row().key("kbd").gap(3.0).items_start();
     let base = 48u8;
     for k in 0..25u8 {
@@ -569,8 +830,8 @@ fn keyboard(ti: usize, accent: Color) -> El {
                 .role("button")
                 .label(aa_core::music::note_name(pitch))
                 .w(if black { 22.0 } else { 30.0 })
-                .h(if black { 54.0 } else { 78.0 })
-                .radius(6.0)
+                .h(if black { 44.0 } else { 64.0 })
+                .radius(5.0)
                 .fill(if black { theme::bg() } else { theme::card_hi() })
                 .border(1.0, theme::line_strong())
                 .hover(accent.alpha(0.3))
@@ -586,5 +847,38 @@ fn keyboard(ti: usize, accent: Color) -> El {
                 }),
         );
     }
-    col().gap(6.0).child(caps("Play it")).child(r)
+    let hardware = match s.ext.devices.keyboard_port() {
+        Some(port) => {
+            let alive = s.ext.devices.last_key.is_some_and(|t| s.now - t < 1.5);
+            row()
+                .gap(6.0)
+                .items_center()
+                .help("Keys you press on the hardware keyboard play this track. Choose the keyboard in Settings → MIDI.")
+                .child(
+                    el().size(8.0, 8.0)
+                        .radius(4.0)
+                        .fill(if alive { theme::ok() } else { theme::faint() }),
+                )
+                .child(
+                    text(format!("Keyboard: {port}"))
+                        .font(font::SMALL)
+                        .color(theme::muted()),
+                )
+        }
+        None => row().child(
+            text("No hardware keyboard connected")
+                .font(font::SMALL)
+                .color(theme::faint()),
+        ),
+    };
+    col()
+        .gap(6.0)
+        .child(
+            row()
+                .gap(12.0)
+                .items_center()
+                .child(caps("Play it"))
+                .child(hardware),
+        )
+        .child(r)
 }

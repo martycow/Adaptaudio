@@ -97,6 +97,18 @@ impl LiveState {
         }
     }
 
+    /// A handle other threads call to make the UI look at new data.
+    pub fn waker_fn(&self) -> impl Fn() + Send + 'static {
+        let waker = Arc::clone(&self.waker);
+        move || {
+            if let Ok(w) = waker.lock()
+                && let Some(w) = w.as_ref()
+            {
+                w();
+            }
+        }
+    }
+
     /// Shows a target the UI just set before the engine reports it.
     pub fn set_param_target(&self, index: usize, value: f32) {
         if let Some(l) = self.targets.get(index) {

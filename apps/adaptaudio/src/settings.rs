@@ -21,8 +21,30 @@ pub struct Settings {
     pub last_project: Option<PathBuf>,
     pub export_dir: Option<PathBuf>,
     pub assistant_model: String,
+    /// "anthropic", "openai" or "qwen".
+    pub assistant_provider: String,
+    /// Overrides the provider's API address (empty = the provider's own).
+    pub assistant_base_url: String,
     /// Reduce animation (beat pulses, glows).
     pub calm_ui: bool,
+    /// MIDI input (a hardware keyboard) that plays the selected track.
+    pub midi_in: Option<String>,
+    /// Which input channel Capture records: 0 = all mixed, 1 = input 1, 2 = input 2.
+    pub audio_in_channel: u8,
+    /// Projects opened lately, newest first.
+    pub recent_projects: Vec<PathBuf>,
+    /// Ask which project to open when the app starts.
+    pub ask_project_on_start: bool,
+    /// Start playing when a section is launched from the Session grid.
+    pub play_on_launch: bool,
+    /// Play a note when it is drawn in the editor.
+    pub preview_notes: bool,
+
+    /// Height of the note editor under the Session grid, in points.
+    pub editor_height: f32,
+    /// GitHub repository ("owner/name") whose releases update the app.
+    pub update_repo: String,
+    pub check_updates_on_start: bool,
 }
 
 impl Default for Settings {
@@ -37,7 +59,19 @@ impl Default for Settings {
             last_project: None,
             export_dir: None,
             assistant_model: "claude-opus-5-5".into(),
+            assistant_provider: "anthropic".into(),
+            assistant_base_url: String::new(),
             calm_ui: false,
+            midi_in: None,
+            audio_in_channel: 0,
+            recent_projects: Vec::new(),
+            ask_project_on_start: true,
+            play_on_launch: true,
+            preview_notes: true,
+
+            editor_height: 320.0,
+            update_repo: String::new(),
+            check_updates_on_start: true,
         }
     }
 }
@@ -48,6 +82,14 @@ pub fn dir() -> Option<PathBuf> {
 }
 
 impl Settings {
+    /// Puts `path` at the top of the recent projects.
+    pub fn remember_project(&mut self, path: &std::path::Path) {
+        self.recent_projects.retain(|p| p != path);
+        self.recent_projects.insert(0, path.to_path_buf());
+        self.recent_projects.truncate(8);
+        self.last_project = Some(path.to_path_buf());
+    }
+
     pub fn load() -> Settings {
         dir()
             .map(|d| d.join("settings.json"))

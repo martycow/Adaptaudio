@@ -2,14 +2,16 @@
 
 use crate::actions::{Action, ActionValidator, tool_definitions};
 use crate::error::AssistantError;
+use crate::openai;
 use crate::prompt::SYSTEM_PROMPT;
+use crate::provider::Provider;
 use crate::summary::project_summary;
-use crate::transport::Transport;
+use crate::transport::{ApiRequest, Transport};
 use aa_core::Project;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// The most capable current Opus model.
+/// The most capable current Opus model; the default for [`Provider::Anthropic`].
 pub const DEFAULT_MODEL: &str = "claude-opus-5-5";
 /// Room for adaptive thinking plus a reply with a few clips of notes, without streaming.
 pub const DEFAULT_MAX_TOKENS: u32 = 16_000;
@@ -23,15 +25,25 @@ pub const MAX_ROUNDS: usize = 6;
 
 const TOOL_OK: &str = "Proposed to the user as an undoable edit; not applied yet. Continue, then summarize your proposals.";
 const PREFIX_MISMATCH: &str = "bound to a different conversation";
+const TRUNCATED_CALL: &str = "the call was cut off by max_tokens; send it again, shorter";
+const NO_REPLY: &str = "(no reply)";
 
 /// One user question and everything the API exchanged for it, stored verbatim (thinking
 /// blocks included) because the API checks that replayed history is unchanged.
+///
+/// `messages` are in the wire format of `provider`. The chat survives a provider switch: a
+/// turn made in the other wire format is replayed as plain text (`user_text`, then
+/// `reply_text`) without its project snapshot, thinking and tool calls; turns in the current
+/// format are replayed verbatim. OpenAI and Qwen share one format.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
     pub user_text: String,
     pub reply_text: String,
-    /// Messages API messages: the user message, then assistant / tool-result pairs.
+    /// The user message, then assistant / tool-result messages, as sent to `provider`.
     pub messages: Vec<Value>,
+    /// Who answered. Turns saved before providers existed are Anthropic turns.
+    #[serde(default)]
+    pub provider: Provider,
 }
 
 /// What one question produced. The app shows `text`, offers `actions` as undoable edits and
@@ -45,11 +57,20 @@ pub struct Reply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Assistant {
+    /// Who answers. Changing it mid-chat is fine (see [`Turn`]); set `model` to match, or use
+    /// [`Assistant::set_provider`].
+    #[serde(default)]
+    pub provider: Provider,
+    /// Model id for `provider`. Ids change often, so the app should let the user edit it.
     pub model: String,
+    /// API address in the form of [`Provider::default_base_url`]; `None` = that default.
+    #[serde(default)]
+    pub base_url: Option<String>,
     pub max_tokens: u32,
-    /// `low`, `medium`, `high`, `xhigh` or `max`.
+    /// `low`, `medium`, `high`, `xhigh` or `max`. Anthropic only.
     pub effort: String,
     /// Ask the API to retry a safety-classifier refusal on a fallback model (beta).
+    /// Anthropic only.
     pub refusal_fallback: bool,
     pub max_history_turns: usize,
     pub history: Vec<Turn>,
@@ -61,7 +82,9 @@ pub struct Assistant {
 impl Default for Assistant {
     fn default() -> Self {
         Assistant {
+            provider: Provider::Anthropic,
             model: DEFAULT_MODEL.to_string(),
+            base_url: None,
             max_tokens: DEFAULT_MAX_TOKENS,
             effort: DEFAULT_EFFORT.to_string(),
             refusal_fallback: true,
@@ -75,6 +98,21 @@ impl Default for Assistant {
 impl Assistant {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An assistant for `provider` with that provider's default model and address.
+    pub fn with_provider(provider: Provider) -> Self {
+        let mut assistant = Self::default();
+        assistant.set_provider(provider);
+        assistant
+    }
+
+    /// Switches provider and resets `model` and `base_url` to the provider's defaults. The
+    /// conversation is kept.
+    pub fn set_provider(&mut self, provider: Provider) {
+        self.provider = provider;
+        self.model = provider.default_model().to_string();
+        self.base_url = None;
     }
 
     /// Forgets the conversation.
@@ -98,6 +136,20 @@ impl Assistant {
         if user_text.is_empty() {
             return Err(AssistantError::EmptyMessage);
         }
+        if self.provider.is_openai_compatible() {
+            self.ask_openai(transport, project, selection_context, user_text)
+        } else {
+            self.ask_anthropic(transport, project, selection_context, user_text)
+        }
+    }
+
+    fn ask_anthropic(
+        &mut self,
+        transport: &dyn Transport,
+        project: &Project,
+        selection_context: &str,
+        user_text: &str,
+    ) -> Result<Reply, AssistantError> {
         let mut turn = vec![user_message(project, selection_context, user_text)];
         let mut validator = ActionValidator::new(project);
         let mut texts: Vec<String> = Vec::new();
@@ -154,7 +206,7 @@ impl Assistant {
             let mut results = Vec::with_capacity(tool_uses.len());
             for (id, name, input) in tool_uses {
                 let outcome = if truncated {
-                    Err("the call was cut off by max_tokens; send it again, shorter".to_string())
+                    Err(TRUNCATED_CALL.to_string())
                 } else {
                     validator.check(&name, &input)
                 };
@@ -197,9 +249,142 @@ impl Assistant {
             user_text: user_text.to_string(),
             reply_text: reply.text.clone(),
             messages: turn,
+            provider: self.provider,
         });
         self.trim_history();
         Ok(reply)
+    }
+
+    /// The same loop over OpenAI-compatible Chat Completions: tool calls arrive in
+    /// `message.tool_calls` and every result goes back as its own `role: "tool"` message.
+    fn ask_openai(
+        &mut self,
+        transport: &dyn Transport,
+        project: &Project,
+        selection_context: &str,
+        user_text: &str,
+    ) -> Result<Reply, AssistantError> {
+        let context = context_text(project, selection_context);
+        let mut turn = vec![openai::user_message(&format!("{context}\n\n{user_text}"))];
+        let mut validator = ActionValidator::new(project);
+        let mut texts: Vec<String> = Vec::new();
+        let mut reply = Reply::default();
+
+        for round in 0..MAX_ROUNDS {
+            let allow_tools = round + 1 < MAX_ROUNDS;
+            let body = openai::request_body(
+                self.provider,
+                &self.model,
+                self.max_tokens,
+                SYSTEM_PROMPT,
+                self.conversation(&turn),
+                allow_tools,
+            );
+            let answer = openai::parse_answer(&self.post(transport, &body)?)?;
+            if !answer.text.is_empty() {
+                texts.push(answer.text);
+            }
+            turn.push(answer.message);
+
+            if answer.tool_calls.is_empty() {
+                if answer.truncated {
+                    reply
+                        .warnings
+                        .push("The reply was cut off (max_tokens).".to_string());
+                }
+                break;
+            }
+            for call in answer.tool_calls {
+                let outcome = if answer.truncated {
+                    Err(TRUNCATED_CALL.to_string())
+                } else {
+                    call.input
+                        .and_then(|input| validator.check(&call.name, &input))
+                };
+                match outcome {
+                    Ok(action) => {
+                        reply.actions.push(action);
+                        turn.push(openai::tool_result(&call.id, TOOL_OK));
+                    }
+                    Err(reason) => {
+                        reply
+                            .warnings
+                            .push(format!("Dropped {}: {reason}", call.name));
+                        turn.push(openai::tool_result(
+                            &call.id,
+                            &format!("Rejected, nothing was proposed: {reason}"),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // As in the Anthropic loop: a turn must end with an assistant message.
+        if turn
+            .last()
+            .and_then(|m| m.get("role"))
+            .and_then(Value::as_str)
+            != Some("assistant")
+        {
+            turn.push(openai::assistant_message("(stopped)"));
+        }
+
+        reply.text = texts.join("\n\n");
+        self.history.push(Turn {
+            user_text: user_text.to_string(),
+            reply_text: reply.text.clone(),
+            messages: turn,
+            provider: self.provider,
+        });
+        self.trim_history();
+        Ok(reply)
+    }
+
+    fn post(&self, transport: &dyn Transport, body: &Value) -> Result<Value, AssistantError> {
+        let url = self
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|base| !base.is_empty())
+            .map(|base| self.provider.endpoint(base));
+        transport.send_request(&ApiRequest {
+            provider: self.provider,
+            url: url.as_deref(),
+            body,
+        })
+    }
+
+    /// History plus the turn in progress, in the current provider's wire format (see [`Turn`]
+    /// for what happens to turns another provider answered).
+    fn conversation(&self, turn: &[Value]) -> Vec<Value> {
+        let openai = self.provider.is_openai_compatible();
+        let mut messages = Vec::new();
+        for past in &self.history {
+            if past.provider.is_openai_compatible() == openai {
+                messages.extend(past.messages.iter().cloned());
+                continue;
+            }
+            let reply = if past.reply_text.trim().is_empty() {
+                NO_REPLY
+            } else {
+                &past.reply_text
+            };
+            if openai {
+                messages.push(openai::user_message(&past.user_text));
+                messages.push(openai::assistant_message(reply));
+            } else {
+                messages.push(json!({
+                    "role": "user",
+                    "content": [{"type": "text", "text": past.user_text}]
+                }));
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": reply}]
+                }));
+            }
+        }
+        messages.extend(turn.iter().cloned());
+        messages
     }
 
     /// One API call with the whole conversation, recovering once from two known 400s.
@@ -213,7 +398,7 @@ impl Assistant {
         let mut retried_stripped = false;
         loop {
             let body = self.request_body(turn, allow_tools);
-            match transport.send(&body) {
+            match self.post(transport, &body) {
                 Err(AssistantError::Http {
                     status: 400,
                     message,
@@ -241,13 +426,7 @@ impl Assistant {
     }
 
     fn request_body(&self, turn: &[Value], allow_tools: bool) -> Value {
-        let messages: Vec<Value> = self
-            .history
-            .iter()
-            .flat_map(|t| t.messages.iter())
-            .chain(turn.iter())
-            .cloned()
-            .collect();
+        let messages = self.conversation(turn);
         let mut thinking = json!({"type": "adaptive"});
         let mut body = json!({
             "model": self.model,
@@ -286,17 +465,21 @@ impl Assistant {
     }
 }
 
-fn user_message(project: &Project, selection_context: &str, user_text: &str) -> Value {
+fn context_text(project: &Project, selection_context: &str) -> String {
     let selection = selection_context.trim();
     let selection = if selection.is_empty() {
         "nothing selected"
     } else {
         selection
     };
-    let context = format!(
+    format!(
         "<project_state>\n{}\n</project_state>\n<selection>\n{selection}\n</selection>",
         project_summary(project)
-    );
+    )
+}
+
+fn user_message(project: &Project, selection_context: &str, user_text: &str) -> Value {
+    let context = context_text(project, selection_context);
     json!({
         "role": "user",
         "content": [
@@ -331,7 +514,7 @@ fn echo_content(content: Option<&Vec<Value>>) -> Vec<Value> {
 /// An assistant message cannot be empty (a refusal fallback can leave nothing to echo).
 fn content_or_placeholder(content: Vec<Value>) -> Vec<Value> {
     if content.is_empty() {
-        vec![json!({"type": "text", "text": "(no reply)"})]
+        vec![json!({"type": "text", "text": NO_REPLY})]
     } else {
         content
     }
@@ -345,7 +528,7 @@ fn strip_thinking(messages: &mut [Value]) {
         if let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) {
             blocks.retain(|b| !matches!(block_type(b), "thinking" | "redacted_thinking"));
             if blocks.is_empty() {
-                blocks.push(json!({"type": "text", "text": "(no reply)"}));
+                blocks.push(json!({"type": "text", "text": NO_REPLY}));
             }
         }
     }

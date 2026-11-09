@@ -4,9 +4,9 @@ use std::fmt;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum AssistantError {
-    /// No key in the Keychain and no `ANTHROPIC_API_KEY` override.
+    /// No key for the chosen provider in the Keychain and no env override.
     NoApiKey,
-    /// The stored key has characters an Anthropic key never has.
+    /// The stored key has characters an API key never has.
     InvalidApiKey,
     /// The macOS `security` tool failed or is missing.
     Keychain(String),
@@ -33,7 +33,7 @@ impl fmt::Display for AssistantError {
         match self {
             AssistantError::NoApiKey => write!(
                 f,
-                "No Anthropic API key. Add one in Settings → AI (it is stored in the macOS Keychain)."
+                "No API key for this AI provider. Add one in Settings → AI (it is stored in the macOS Keychain)."
             ),
             AssistantError::InvalidApiKey => {
                 write!(
@@ -48,7 +48,9 @@ impl fmt::Display for AssistantError {
                     "`curl` was not found; the assistant needs it to reach the API."
                 )
             }
-            AssistantError::Network(msg) => write!(f, "Could not reach the Anthropic API: {msg}"),
+            AssistantError::Network(msg) => {
+                write!(f, "Could not reach the AI provider's API: {msg}")
+            }
             AssistantError::Http {
                 status,
                 kind,

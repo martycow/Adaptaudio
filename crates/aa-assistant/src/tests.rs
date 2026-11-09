@@ -9,6 +9,8 @@ use std::collections::VecDeque;
 struct FakeTransport {
     answers: RefCell<VecDeque<Result<Value, AssistantError>>>,
     requests: RefCell<Vec<Value>>,
+    /// Provider and URL of every request.
+    targets: RefCell<Vec<(Provider, Option<String>)>>,
 }
 
 impl FakeTransport {
@@ -16,6 +18,7 @@ impl FakeTransport {
         FakeTransport {
             answers: RefCell::new(answers.into()),
             requests: RefCell::new(Vec::new()),
+            targets: RefCell::new(Vec::new()),
         }
     }
 
@@ -31,6 +34,13 @@ impl Transport for FakeTransport {
             .borrow_mut()
             .pop_front()
             .unwrap_or_else(|| Ok(text_message("(script ended)")))
+    }
+
+    fn send_request(&self, request: &ApiRequest<'_>) -> Result<Value, AssistantError> {
+        self.targets
+            .borrow_mut()
+            .push((request.provider, request.url.map(str::to_string)));
+        self.send(request.body)
     }
 }
 
@@ -575,4 +585,337 @@ fn actions_round_trip_through_serde() {
     assert_eq!(json["type"], "CreateClip");
     assert_eq!(serde_json::from_value::<Action>(json).unwrap(), action);
     assert!(action.describe().contains("\"A\""));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Providers: OpenAI-compatible Chat Completions (OpenAI, Qwen)
+
+fn chat(finish_reason: &str, message: Value) -> Value {
+    json!({"id": "chatcmpl-1", "object": "chat.completion",
+        "choices": [{"index": 0, "finish_reason": finish_reason, "message": message}]})
+}
+
+fn chat_text(text: &str) -> Value {
+    chat("stop", json!({"role": "assistant", "content": text}))
+}
+
+fn chat_call(id: &str, name: &str, arguments: &str) -> Value {
+    json!({"id": id, "type": "function", "function": {"name": name, "arguments": arguments}})
+}
+
+#[test]
+fn provider_ids_round_trip() {
+    for provider in Provider::ALL {
+        assert_eq!(Provider::from_id(provider.id()), Some(provider));
+        assert_eq!(
+            serde_json::to_value(provider).unwrap(),
+            json!(provider.id())
+        );
+        assert_eq!(
+            serde_json::from_value::<Provider>(json!(provider.id())).unwrap(),
+            provider
+        );
+        assert!(!provider.name().is_empty() && !provider.default_model().is_empty());
+        assert!(provider.default_base_url().starts_with("https://"));
+    }
+    assert_eq!(Provider::from_id("OpenAI"), None);
+    assert_eq!(Provider::default(), Provider::Anthropic);
+    assert_eq!(Provider::Anthropic.default_model(), DEFAULT_MODEL);
+    assert_eq!(Provider::Anthropic.default_base_url(), MESSAGES_URL);
+    assert_eq!(
+        Provider::OpenAi.endpoint("https://api.openai.com/v1/"),
+        "https://api.openai.com/v1/chat/completions"
+    );
+    assert_eq!(Provider::Anthropic.endpoint(MESSAGES_URL), MESSAGES_URL);
+
+    // Settings saved before providers existed still load.
+    let mut saved = serde_json::to_value(Assistant::new()).unwrap();
+    let fields = saved.as_object_mut().unwrap();
+    fields.remove("provider");
+    fields.remove("base_url");
+    let loaded: Assistant = serde_json::from_value(saved).unwrap();
+    assert_eq!(loaded.provider, Provider::Anthropic);
+    assert_eq!(loaded.base_url, None);
+}
+
+#[test]
+fn openai_tool_call_becomes_an_action() {
+    let first = chat(
+        "tool_calls",
+        json!({"role": "assistant", "content": null, "tool_calls": [
+            chat_call("call_1", "set_tempo", r#"{"bpm": 96}"#),
+            chat_call("call_2", "set_tempo", r#"{"bpm": 4000}"#),
+            chat_call("call_3", "set_tempo", r#"{"bpm": "#)
+        ]}),
+    );
+    let fake = FakeTransport::new(vec![Ok(first), Ok(chat_text("Темп 96."))]);
+    let mut assistant = Assistant::with_provider(Provider::OpenAi);
+    let reply = assistant.ask(&fake, &project(), "", "медленнее").unwrap();
+
+    assert_eq!(reply.text, "Темп 96.");
+    assert_eq!(reply.actions, vec![Action::SetTempo { bpm: 96.0 }]);
+    assert_eq!(reply.warnings.len(), 2, "{:?}", reply.warnings);
+    assert!(reply.warnings[1].contains("not valid JSON"));
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    let second = messages(&requests[1]);
+    assert_eq!(
+        second.len(),
+        6,
+        "system, user, assistant, three tool results"
+    );
+    assert_eq!(second[2]["role"], "assistant");
+    assert_eq!(second[2]["tool_calls"][0]["id"], "call_1");
+    assert_eq!(
+        second[2]["tool_calls"][2]["function"]["arguments"], "{}",
+        "unreadable arguments are not replayed"
+    );
+    assert_eq!(second[3]["role"], "tool");
+    assert_eq!(second[3]["tool_call_id"], "call_1");
+    assert!(
+        second[3]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Proposed to the user")
+    );
+    assert_eq!(second[4]["tool_call_id"], "call_2");
+    assert!(second[4]["content"].as_str().unwrap().contains("Rejected"));
+    assert_eq!(second[5]["tool_call_id"], "call_3");
+
+    assert_eq!(assistant.history.len(), 1);
+    assert_eq!(assistant.history[0].provider, Provider::OpenAi);
+    assert_eq!(assistant.history[0].messages.len(), 6);
+    assert_eq!(
+        fake.targets.borrow()[0],
+        (Provider::OpenAi, None),
+        "no base_url: the transport picks the provider default"
+    );
+}
+
+#[test]
+fn openai_plain_text_round_trips() {
+    let fake = FakeTransport::new(vec![Ok(chat_text("  Грув — это качание ритма.  "))]);
+    let mut assistant = Assistant::with_provider(Provider::Qwen);
+    assistant.model = "qwen-custom".to_string();
+    assistant.base_url = Some("https://example.test/compatible-mode/v1/".to_string());
+    let reply = assistant
+        .ask(&fake, &project(), "", "что такое грув?")
+        .unwrap();
+
+    assert_eq!(reply.text, "Грув — это качание ритма.");
+    assert!(reply.actions.is_empty() && reply.warnings.is_empty());
+    assert_eq!(
+        fake.targets.borrow()[0],
+        (
+            Provider::Qwen,
+            Some("https://example.test/compatible-mode/v1/chat/completions".to_string())
+        )
+    );
+    assert_eq!(fake.requests()[0]["model"], "qwen-custom");
+    let turn = &assistant.history[0];
+    assert_eq!(turn.reply_text, "Грув — это качание ритма.");
+    assert_eq!(turn.messages.len(), 2);
+    assert_eq!(turn.messages[1]["role"], "assistant");
+    let saved = serde_json::to_string(&assistant).unwrap();
+    let loaded: Assistant = serde_json::from_str(&saved).unwrap();
+    assert_eq!(loaded.history, assistant.history);
+    assert_eq!(loaded.provider, Provider::Qwen);
+}
+
+#[test]
+fn openai_request_has_converted_tools_and_a_system_message() {
+    let fake = FakeTransport::new(vec![Ok(chat_text("ok")), Ok(chat_text("ok"))]);
+    let mut assistant = Assistant::with_provider(Provider::OpenAi);
+    assistant.ask(&fake, &project(), "", "привет").unwrap();
+    assistant.set_provider(Provider::Qwen);
+    assistant.ask(&fake, &project(), "", "ещё").unwrap();
+    let requests = fake.requests();
+    let body = &requests[0];
+
+    assert_eq!(body["model"], Provider::OpenAi.default_model());
+    assert_eq!(body["max_completion_tokens"], DEFAULT_MAX_TOKENS);
+    assert!(body.get("max_tokens").is_none());
+    assert_eq!(body["tool_choice"], "auto");
+    for anthropic_only in [
+        "system",
+        "thinking",
+        "fallbacks",
+        "output_config",
+        "cache_control",
+    ] {
+        assert!(body.get(anthropic_only).is_none(), "{anthropic_only}");
+    }
+    assert!(required_betas(body).is_empty());
+
+    let source = tool_definitions();
+    let source = source.as_array().unwrap();
+    let tools = body["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), source.len());
+    for (tool, original) in tools.iter().zip(source) {
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["function"]["name"], original["name"]);
+        assert_eq!(tool["function"]["description"], original["description"]);
+        assert_eq!(tool["function"]["parameters"], original["input_schema"]);
+    }
+
+    let sent = messages(body);
+    assert_eq!(sent[0], json!({"role": "system", "content": SYSTEM_PROMPT}));
+    assert_eq!(sent[1]["role"], "user");
+    let user = sent[1]["content"].as_str().unwrap();
+    assert!(user.contains("<project_state>") && user.ends_with("привет"));
+
+    // Qwen: same format, its own model and token field, OpenAI turn replayed verbatim.
+    assert_eq!(requests[1]["model"], Provider::Qwen.default_model());
+    assert_eq!(requests[1]["max_tokens"], DEFAULT_MAX_TOKENS);
+    assert_eq!(messages(&requests[1])[1..3], sent_turn(&assistant, 0)[..]);
+}
+
+fn sent_turn(assistant: &Assistant, index: usize) -> Vec<Value> {
+    assistant.history[index].messages.clone()
+}
+
+#[test]
+fn openai_error_passes_through_and_leaves_history_alone() {
+    let unauthorized = AssistantError::Http {
+        status: 401,
+        kind: "invalid_request_error".into(),
+        message: "Incorrect API key provided: [key hidden].".into(),
+    };
+    let filtered = chat(
+        "content_filter",
+        json!({"role": "assistant", "content": ""}),
+    );
+    let refused = chat(
+        "stop",
+        json!({"role": "assistant", "content": null, "refusal": "I can't help with that."}),
+    );
+    let fake = FakeTransport::new(vec![
+        Err(unauthorized.clone()),
+        Ok(filtered),
+        Ok(refused),
+        Ok(json!({"choices": []})),
+    ]);
+    let mut assistant = Assistant::with_provider(Provider::OpenAi);
+    let p = project();
+    let err = assistant.ask(&fake, &p, "", "hi").unwrap_err();
+    assert_eq!(err, unauthorized);
+    assert!(err.to_string().contains("Check the API key"));
+    for _ in 0..2 {
+        assert_eq!(
+            assistant.ask(&fake, &p, "", "hi"),
+            Err(AssistantError::Refused { category: None })
+        );
+    }
+    assert!(matches!(
+        assistant.ask(&fake, &p, "", "hi"),
+        Err(AssistantError::BadJson(_))
+    ));
+    assert!(assistant.history.is_empty());
+    assert_eq!(fake.requests().len(), 4, "no Anthropic-style retries");
+}
+
+#[test]
+fn openai_endless_tool_calls_end_with_a_tool_free_round() {
+    let calls: Vec<_> = (0..MAX_ROUNDS)
+        .map(|i| {
+            Ok(chat(
+                "tool_calls",
+                json!({"role": "assistant", "content": "", "tool_calls": [
+                    chat_call(&format!("c{i}"), "explain_term", r#"{"term": "groove"}"#)
+                ]}),
+            ))
+        })
+        .collect();
+    let fake = FakeTransport::new(calls);
+    let mut assistant = Assistant::with_provider(Provider::OpenAi);
+    assistant.ask(&fake, &project(), "", "объясни").unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), MAX_ROUNDS);
+    assert_eq!(requests[0]["tool_choice"], "auto");
+    assert_eq!(requests[MAX_ROUNDS - 1]["tool_choice"], "none");
+    let last = assistant.history[0].messages.last().unwrap();
+    assert_eq!(last["role"], "assistant");
+    assert!(last.get("tool_calls").is_none());
+}
+
+#[test]
+fn openai_truncated_tool_calls_are_not_proposed() {
+    let cut = chat(
+        "length",
+        json!({"role": "assistant", "content": null, "tool_calls": [
+            chat_call("c1", "set_tempo", r#"{"bpm": 90}"#)
+        ]}),
+    );
+    let fake = FakeTransport::new(vec![Ok(cut), Ok(chat_text("done"))]);
+    let mut assistant = Assistant::with_provider(Provider::Qwen);
+    let reply = assistant.ask(&fake, &project(), "", "hi").unwrap();
+    assert!(reply.actions.is_empty());
+    assert!(reply.warnings[0].contains("max_tokens"));
+}
+
+#[test]
+fn history_survives_switching_provider_mid_chat() {
+    let fake = FakeTransport::new(vec![
+        Ok(message(
+            "tool_use",
+            json!([{"type": "thinking", "thinking": "", "signature": "s1"},
+            tool_use("t1", "set_tempo", json!({"bpm": 100}))]),
+        )),
+        Ok(text_message("Темп 100.")),
+        Ok(chat(
+            "tool_calls",
+            json!({"role": "assistant", "content": null, "tool_calls": [
+                chat_call("c1", "set_tempo", r#"{"bpm": 90}"#)
+            ]}),
+        )),
+        Ok(chat_text("Темп 90.")),
+        Ok(text_message("Готово.")),
+    ]);
+    let mut assistant = Assistant::new();
+    let p = project();
+    assistant.ask(&fake, &p, "", "медленнее").unwrap();
+    assistant.set_provider(Provider::OpenAi);
+    assistant.ask(&fake, &p, "", "ещё медленнее").unwrap();
+    assistant.set_provider(Provider::Anthropic);
+    assistant.ask(&fake, &p, "", "спасибо").unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 5);
+    let providers: Vec<Provider> = fake.targets.borrow().iter().map(|t| t.0).collect();
+    assert_eq!(providers[..2], [Provider::Anthropic; 2]);
+    assert_eq!(providers[2..4], [Provider::OpenAi; 2]);
+    assert_eq!(providers[4], Provider::Anthropic);
+
+    // OpenAI sees the Claude turn as two plain text messages: no blocks, no tool calls.
+    let to_openai = messages(&requests[2]);
+    assert_eq!(
+        to_openai[1],
+        json!({"role": "user", "content": "медленнее"})
+    );
+    assert_eq!(
+        to_openai[2],
+        json!({"role": "assistant", "content": "Темп 100."})
+    );
+    assert_eq!(to_openai[3]["role"], "user");
+    assert_eq!(to_openai.len(), 4);
+
+    // Back on Claude: its own turn verbatim (thinking and tools), the OpenAI turn as text.
+    let to_claude = messages(&requests[4]);
+    assert_eq!(to_claude[..4], assistant.history[0].messages[..]);
+    assert_eq!(count_blocks(&to_claude[..4], "thinking"), 2);
+    assert_eq!(to_claude[4]["content"][0]["text"], "ещё медленнее");
+    assert_eq!(
+        to_claude[5]["content"],
+        json!([{"type": "text", "text": "Темп 90."}])
+    );
+    assert_eq!(to_claude[6]["role"], "user");
+    assert_eq!(to_claude.len(), 7);
+    assert!(
+        to_claude
+            .iter()
+            .all(|m| m["role"] != "tool" && m.get("tool_calls").is_none())
+    );
+    assert_eq!(requests[4]["model"], DEFAULT_MODEL);
 }

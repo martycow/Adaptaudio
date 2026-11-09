@@ -18,10 +18,10 @@ anthropomorphic opossum living in the Pacific Northwest.
 Adaptaudio combines three things:
 
 - **Sequencer:** tracks by role (Pad, Bass, Kick…), clips with step patterns, per-note sound settings.
-- **Sound lab:** a built-in synth, a sampler, and hardware synths played over MIDI and
-  recorded back in (auto-sampling).
+- **Sound lab:** a built-in synth with a sound library, a sampler, and hardware synths played
+  over MIDI and recorded back in (auto-sampling).
 - **Adaptive engine:** game parameters, game modes, events, per-track Influence, transitions,
-  and a Simulator that plays the game's role.
+  and a Playtest screen that plays the game's role.
 
 Music is exported to **FMOD Studio**. In the game, FMOD plays it, not Adaptaudio.
 
@@ -36,7 +36,9 @@ Full picture: [docs/VISION.md](docs/VISION.md).
 |---|---|
 | Game engine | Unity |
 | Game audio runtime | FMOD. No custom native plugin: Adaptaudio exports stems + `manifest.json` |
-| UI framework | Rune, pinned to a git revision of `dev` |
+| UI framework | Rune and its component kit `rune-kit`, pinned to one git revision of `dev` |
+| Assistant providers | Claude, Codex (OpenAI), Qwen (DashScope), each by API key in the Keychain |
+| App updates | GitHub Releases; the repository is set in Settings → Updates |
 | Game parameters | Intensity, Tension, Paranoia, PuzzleProgress (0..1) |
 | Game modes | Explore, Stealth, Search, Alert, Chase, Relief, Puzzle, PlayDead |
 | Puzzle kinds | Timing, Pattern, Echo |
@@ -57,7 +59,8 @@ Decision log and open questions: [docs/VISION.md](docs/VISION.md#решения)
 | ASM Hydrasynth Explorer | Main synth: live over MIDI and auto-sampled |
 | Arturia MiniFreak | Second synth: arps and textures |
 | Teenage Engineering EP-1320 | Sampler and groovebox, synced by MIDI Clock |
-| Zoom H4essential | USB audio interface and field recorder |
+| Focusrite Scarlett Solo (2nd gen) | USB audio interface: input 1 microphone, input 2 instrument or line |
+| Zoom H4essential | Field recorder |
 | Tongue drum, ocarina | Recorded as samples |
 | Mac Mini | Host machine (macOS, Apple Silicon) |
 
@@ -79,13 +82,14 @@ crates/
   aa-puzzle/          rhythmic puzzle logic: Timing / Pattern / Echo
   aa-engine/          real-time audio engine
   aa-midi/            MIDI I/O and clock
-  aa-capture/         hardware auto-sampling, latency calibration
+  aa-capture/         recording: hardware auto-sampling, clock-synced loops, free takes, latency
   aa-export/          FMOD export: stems, manifest, puzzle data and test vectors
-  aa-assistant/       AI assistant: Claude API via curl, proposals applied with Undo
+  aa-assistant/       AI assistant: Claude, OpenAI and Qwen APIs via curl, proposals applied with Undo
 apps/
   adaptaudio/         Rune application: one module per screen in src/screens/
 tools/
   fmod-import/        FMOD Studio JavaScript import script
+  bundle-macos/       builds Adaptaudio.app and the release zip the in-app updater downloads
 ```
 
 ## Setup and commands
@@ -102,6 +106,7 @@ Headless screenshots: `cargo run -p adaptaudio -- --snap shot.png --scene chase 
 | Lint | `cargo clippy --workspace --all-targets -- -D warnings` |
 | Format | `cargo fmt --all` |
 | Build | `cargo build --release -p adaptaudio` |
+| Build the .app and release zip | `tools/bundle-macos/bundle.sh` |
 
 Run the tests and the linter before you report a task as done.
 If a command fails, report the output. Do not hide or skip failures.

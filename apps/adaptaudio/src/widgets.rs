@@ -3,6 +3,162 @@
 use crate::state::App;
 use crate::theme::{self, font};
 use rune::{Color, Drag, El, Live, Phase, Shape, Tx, canvas, col, el, row, text};
+use rune_kit::{ScrollBar, ScrollBarStyle, Select, SelectAppearance};
+use std::cell::RefCell;
+
+thread_local! {
+    /// Floating pieces (open dropdown lists) collected while the view is built; the shell mounts
+    /// them above everything else.
+    static LAYER: RefCell<Vec<El>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Takes the floating pieces built since the last call.
+pub fn take_layer() -> Vec<El> {
+    LAYER.with(|l| std::mem::take(&mut *l.borrow_mut()))
+}
+
+/// A dropdown list. `on_choose` gets the index of the picked option.
+pub fn dropdown<T: AsRef<str>>(
+    s: &App,
+    key: &str,
+    options: &[T],
+    current: Option<usize>,
+    width: f32,
+    on_choose: impl Fn(&mut App, usize, &mut Tx) + Clone + 'static,
+) -> El {
+    let kit = theme::kit(s.accent());
+    let names: Vec<String> = options.iter().map(|o| o.as_ref().to_string()).collect();
+    let open = s.open_menu.as_deref() == Some(key);
+    let (k1, lookup) = (key.to_string(), names.clone());
+    let select = Select::new(key, &names)
+        .appearance(SelectAppearance::Field)
+        .width(width)
+        .placeholder("Choose…")
+        .current(current.and_then(|i| names.get(i)).map(String::as_str))
+        .open(open)
+        .on_toggle(move |s: &mut App| {
+            s.open_menu = if s.open_menu.as_deref() == Some(k1.as_str()) {
+                None
+            } else {
+                Some(k1.clone())
+            }
+        })
+        .on_close(|s: &mut App| s.open_menu = None)
+        .on_choose(move |s: &mut App, picked: &str, tx: &mut Tx| {
+            s.open_menu = None;
+            if let Some(i) = lookup.iter().position(|n| n == picked) {
+                on_choose(s, i, tx);
+            }
+        });
+    LAYER.with(|l| select.build(&kit, &mut l.borrow_mut()))
+}
+
+/// A name on the left, a control on the right.
+pub fn field_row(name: &str, control: El) -> El {
+    row()
+        .gap(10.0)
+        .items_center()
+        .child(term(name, font::LABEL, theme::muted()).w(120.0))
+        .child(control)
+}
+
+fn bar_style() -> ScrollBarStyle {
+    ScrollBarStyle::neutral(true)
+        .thumb(theme::line_strong())
+        .thumb_hover(theme::faint())
+}
+
+/// Fills the space it is given and scrolls its content down, with a scroll bar when needed.
+/// Rune tells scroll bars apart by where they are made, hence `track_caller` on these helpers.
+#[track_caller]
+pub fn vscroll(content: El) -> El {
+    col()
+        .grow(1.0)
+        .min_h(0.0)
+        .min_w(0.0)
+        .scroll(rune::el::ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(content)
+        .scroll_bar_styled(bar_style())
+}
+
+/// Scrolls its content sideways, with a scroll bar when needed.
+#[track_caller]
+pub fn hscroll(content: El) -> El {
+    row()
+        .min_w(0.0)
+        .scroll_x()
+        .child(content)
+        .scroll_bar_styled(bar_style().horizontal())
+}
+
+/// Scrolls both ways (grids); the scroll bar shows the vertical position.
+#[track_caller]
+pub fn xyscroll(content: El) -> El {
+    col()
+        .grow(1.0)
+        .min_h(0.0)
+        .min_w(0.0)
+        .scroll_xy()
+        .child(content)
+        .scroll_bar_styled(bar_style())
+}
+
+/// A one-line text field. Its key ends in "-field" so typing never triggers shortcuts.
+pub fn text_field(
+    name: &str,
+    edit: &rune::TextEdit,
+    placeholder: &str,
+    width: f32,
+    access: impl for<'a> Fn(&'a mut App) -> &'a mut rune::TextEdit + 'static,
+) -> El {
+    rune::text_input(edit, font::BODY)
+        .key(format!("{name}-field"))
+        .single_line()
+        .placeholder(placeholder.to_string(), theme::faint())
+        .w(width)
+        .px(10.0)
+        .py(7.0)
+        .radius(8.0)
+        .fill(theme::panel())
+        .border(1.0, theme::line_strong())
+        .on_edit(access)
+}
+
+/// A toolbar button with a glyph and a word, so nobody has to guess.
+pub fn tool_button(
+    key: impl Into<String>,
+    glyph: &str,
+    label: &str,
+    help: &str,
+    active: bool,
+    accent: Color,
+) -> El {
+    let ink = if active { accent } else { theme::text() };
+    row()
+        .key(key)
+        .role("button")
+        .label(label.to_string())
+        .help(help.to_string())
+        .focusable(true)
+        .h(32.0)
+        .px(10.0)
+        .gap(6.0)
+        .center()
+        .radius(8.0)
+        .fill(if active {
+            accent.alpha(0.16)
+        } else {
+            theme::panel()
+        })
+        .hover(theme::hover())
+        .press(theme::press())
+        .press_scale(0.96)
+        .motion(rune::tok::motion::SNAPPY)
+        .child(text(glyph).font(font::HEAD).color(ink))
+        .child(text(label.to_string()).font(font::LABEL).color(ink))
+}
 
 pub fn label(s: impl Into<String>) -> El {
     text(s).font(font::LABEL).color(theme::muted())
@@ -31,10 +187,9 @@ pub fn term(s: &str, style: rune::TextStyle, color: Color) -> El {
 pub fn card() -> El {
     col()
         .fill(theme::card())
-        .radius(14.0)
-        .border(1.0, theme::line())
-        .padding(14.0)
-        .gap(10.0)
+        .radius(12.0)
+        .padding(16.0)
+        .gap(12.0)
 }
 
 /// A text button. `primary` fills it with the accent.
@@ -55,54 +210,17 @@ pub fn button(
         .role("button")
         .label(label.clone())
         .focusable(true)
+        .self_start()
         .h(30.0)
         .px(12.0)
         .center()
-        .radius(9.0)
+        .radius(8.0)
         .fill(fill)
         .border(1.0, border)
         .hover(theme::hover())
         .press(theme::press())
         .press_scale(0.96)
         .child(text(label).font(font::LABEL).color(ink))
-}
-
-/// A small square icon-ish button with a glyph.
-pub fn glyph_button(
-    key: impl Into<String>,
-    glyph: &str,
-    help: &str,
-    active: bool,
-    accent: Color,
-) -> El {
-    let fill = if active {
-        accent.alpha(0.22)
-    } else {
-        theme::card_hi()
-    };
-    let ink = if active { accent } else { theme::text() };
-    row()
-        .key(key)
-        .role("button")
-        .label(help.to_string())
-        .help(help.to_string())
-        .focusable(true)
-        .size(30.0, 30.0)
-        .center()
-        .radius(9.0)
-        .fill(fill)
-        .border(
-            1.0,
-            if active {
-                accent.alpha(0.6)
-            } else {
-                theme::line_strong()
-            },
-        )
-        .hover(theme::hover())
-        .press(theme::press())
-        .press_scale(0.92)
-        .child(text(glyph).font(font::HEAD).color(ink))
 }
 
 /// A rounded tag. `active` lights it in its colour.
@@ -147,6 +265,7 @@ pub fn segmented(
     let mut r = row()
         .key(key.to_string())
         .role("radiogroup")
+        .self_start()
         .fill(theme::panel())
         .radius(9.0)
         .padding(2.0)
@@ -371,10 +490,10 @@ pub fn screen_header(name: &str, about: &str, accent: Color) -> El {
             row()
                 .gap(10.0)
                 .items_center()
-                .child(el().size(4.0, 22.0).radius(2.0).fill(accent))
+                .child(el().size(8.0, 8.0).radius(4.0).fill(accent))
                 .child(text(name).font(font::HERO).color(theme::text())),
         )
-        .child(text(about).font(font::BODY).color(theme::muted()))
+        .child(text(about).font(font::BODY).color(theme::muted()).wrap())
 }
 
 /// Linear-to-dB text.

@@ -111,10 +111,7 @@ fn clicking_the_piano_roll_adds_a_note_in_the_scale() {
         .find(|t| t.name == "Lead")
         .unwrap();
     let (tid, cid) = (lead.id, lead.clips[0].id);
-    rt.update(|s, _| {
-        s.select_clip(tid, Some(cid));
-        s.screen = Screen::Pattern;
-    });
+    rt.update(|s, _| s.select_clip(tid, Some(cid)));
     run(&mut rt, 1.0);
     let before = rt.state.project.clip(tid, cid).unwrap().notes.len();
     // Step 2 is empty in the demo's lead line; D5 (74) is in D minor.
@@ -131,9 +128,147 @@ fn clicking_the_piano_roll_adds_a_note_in_the_scale() {
 }
 
 #[test]
+fn the_editor_shows_only_while_a_clip_is_selected() {
+    let mut rt = app();
+    assert!(rt.find("session-editor").is_none(), "nothing is selected");
+    let lead = rt
+        .state
+        .project
+        .tracks
+        .iter()
+        .find(|t| t.name == "Lead")
+        .unwrap();
+    let (tid, cid) = (lead.id, lead.clips[0].id);
+    rt.update(|s, _| s.select_clip(tid, Some(cid)));
+    run(&mut rt, 0.5);
+    assert!(rt.find("session-editor").is_some());
+    click(&mut rt, "editor-close");
+    run(&mut rt, 0.5);
+    assert_eq!(rt.state.selected_clip, None);
+    assert!(rt.find("session-editor").is_none());
+}
+
+#[test]
+fn dragging_the_divider_resizes_the_editor() {
+    let mut rt = app();
+    let lead = rt
+        .state
+        .project
+        .tracks
+        .iter()
+        .find(|t| t.name == "Lead")
+        .unwrap();
+    let (tid, cid) = (lead.id, lead.clips[0].id);
+    rt.update(|s, _| s.select_clip(tid, Some(cid)));
+    run(&mut rt, 0.5);
+    let before = rt.state.settings.editor_height;
+    let (x, y) = rt.find("session-divider").unwrap();
+    rt.pointer_down(x, y);
+    rt.frame(1.0 / 60.0);
+    rt.pointer_move(x, y - 80.0);
+    rt.frame(1.0 / 60.0);
+    assert!(
+        (rt.state.settings.editor_height - (before + 80.0)).abs() < 2.0,
+        "{} → {}",
+        before,
+        rt.state.settings.editor_height
+    );
+}
+
+#[test]
+fn every_play_button_shows_the_same_transport() {
+    let mut rt = app();
+    rt.update(|s, _| s.screen = Screen::Playtest);
+    run(&mut rt, 0.3);
+    // Start from the top bar: the Playtest button turns into Stop.
+    click(&mut rt, "play");
+    assert!(
+        rt.state.playing,
+        "no flicker back before the engine answers"
+    );
+    run(&mut rt, 0.5);
+    assert!(rt.state.playing);
+    // Stop from the Playtest button: the top bar follows.
+    click(&mut rt, "playtest-play");
+    assert!(!rt.state.playing);
+    run(&mut rt, 0.5);
+    assert!(!rt.state.playing);
+    assert!(!rt.state.controller.telemetry.is_playing());
+    // Stopping also ends a running scenario, wherever it was stopped from.
+    rt.update(|s, _| crate::actions::start_scenario(s, 0));
+    run(&mut rt, 0.5);
+    assert!(rt.state.playing && rt.state.scenario.is_some());
+    click(&mut rt, "play");
+    run(&mut rt, 0.3);
+    assert!(!rt.state.playing && rt.state.scenario.is_none());
+    // The engine stopping by itself reaches the buttons too.
+    click(&mut rt, "play");
+    run(&mut rt, 0.3);
+    rt.update(|s, _| s.send(aa_engine::Command::Stop));
+    run(&mut rt, 0.3);
+    assert!(!rt.state.playing);
+}
+
+#[test]
+fn the_scale_is_chosen_from_a_dropdown() {
+    let mut rt = app();
+    click(&mut rt, "scale-trigger");
+    assert_eq!(rt.state.open_menu.as_deref(), Some("scale"));
+    rt.update(|s, _| crate::actions::set_scale(s, 0));
+    let first = aa_core::ScaleKind::ALL[0];
+    assert_eq!(rt.state.project.scale, first);
+    rt.state.undo();
+    assert_ne!(rt.state.project.scale, first);
+}
+
+#[test]
+fn the_wizard_makes_an_empty_project_with_the_game_side_ready() {
+    let mut rt = app();
+    rt.update(|s, _| s.wizard = Some(crate::screens::wizard::Wizard::start()));
+    run(&mut rt, 0.3);
+    click(&mut rt, "wizard-new");
+    run(&mut rt, 0.3);
+    assert!(rt.state.wizard.as_ref().is_some_and(|w| w.creating));
+    let project = rt.state.wizard.as_ref().unwrap().build();
+    assert!(project.tracks.is_empty());
+    assert!(!project.game_modes.is_empty());
+    click(&mut rt, "wizard-back");
+    click(&mut rt, "wizard-demo");
+    assert!(rt.state.wizard.is_none());
+    assert!(!rt.state.project.tracks.is_empty());
+}
+
+#[test]
+fn every_tab_of_every_screen_renders() {
+    let mut rt = app();
+    for (screen, tabs) in [
+        (Screen::Adaptive, crate::screens::adaptive::TABS.len()),
+        (Screen::Learn, crate::screens::learn::TABS.len()),
+        (Screen::Settings, crate::screens::settings::TABS.len()),
+        (Screen::Capture, crate::screens::capture::CASES.len()),
+    ] {
+        for tab in 0..tabs {
+            rt.update(|s, _| {
+                s.screen = screen;
+                s.tabs.adaptive = tab;
+                s.tabs.learn = tab;
+                s.tabs.settings = tab;
+                s.tabs.capture = tab;
+                s.tabs.transition = Some((0, 1));
+            });
+            rt.frame(1.0 / 60.0);
+            assert!(rt.find("content").is_some(), "{screen:?} tab {tab}");
+        }
+    }
+}
+
+#[test]
 fn every_screen_and_panel_renders() {
     let mut rt = app();
-    rt.update(|s, _| s.assistant_open = true);
+    rt.update(|s, _| {
+        s.assistant_open = true;
+        s.sim_open = true;
+    });
     for screen in Screen::ALL {
         rt.update(|s, _| s.screen = screen);
         rt.frame(1.0 / 60.0);
@@ -152,9 +287,9 @@ fn an_assistant_proposal_applies_as_one_undo_step() {
 }
 
 #[test]
-fn the_simulator_pad_sets_intensity_and_tension() {
+fn the_playtest_pad_sets_intensity_and_tension() {
     let mut rt = app();
-    rt.update(|s, _| s.screen = Screen::Simulator);
+    rt.update(|s, _| s.screen = Screen::Playtest);
     run(&mut rt, 1.0);
     let (x, y) = rt.find("pad-big").unwrap();
     // Centre of the pad is (0.5, 0.5); press right of and above it.

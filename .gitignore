@@ -3,3 +3,4 @@
 Export/
 .DS_Store
 /*.wav
+/dist

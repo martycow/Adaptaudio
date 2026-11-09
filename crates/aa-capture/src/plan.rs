@@ -137,6 +137,29 @@ impl CapturePlan {
     }
 }
 
+/// MIDI Start at `start_ms`, 24 clock ticks per beat at `bpm` for `length_ms`, then Stop: what
+/// a groovebox needs to play its pattern in time while it is being recorded.
+pub fn clock_events(bpm: f32, start_ms: u64, length_ms: u64) -> Vec<TimedMidi> {
+    let tick_ms = 60_000.0 / f64::from(bpm.clamp(20.0, 400.0)) / 24.0;
+    let ticks = (length_ms as f64 / tick_ms).ceil() as u64;
+    let mut events = vec![TimedMidi {
+        offset_ms: start_ms,
+        msg: MidiMessage::Start,
+        take: 0,
+    }];
+    events.extend((0..ticks).map(|n| TimedMidi {
+        offset_ms: start_ms + (n as f64 * tick_ms).round() as u64,
+        msg: MidiMessage::Clock,
+        take: 0,
+    }));
+    events.push(TimedMidi {
+        offset_ms: start_ms + length_ms,
+        msg: MidiMessage::Stop,
+        take: 0,
+    });
+    events
+}
+
 /// Converts milliseconds to a sample count without rounding drift.
 pub fn ms_to_samples(ms: u64, sample_rate: u32) -> usize {
     (ms * u64::from(sample_rate) / 1000) as usize
@@ -223,5 +246,18 @@ mod tests {
     fn ms_to_samples_is_exact() {
         assert_eq!(ms_to_samples(1000, 48_000), 48_000);
         assert_eq!(ms_to_samples(3_600_000, 44_100), 158_760_000);
+    }
+
+    #[test]
+    fn clock_events_start_tick_and_stop() {
+        // One beat at 120 BPM is 500 ms: Start, 24 ticks, Stop.
+        let events = clock_events(120.0, 200, 500);
+        assert_eq!(events.len(), 26);
+        assert_eq!(events[0].msg, MidiMessage::Start);
+        assert_eq!(events[1].offset_ms, 200);
+        assert_eq!(events[24].offset_ms, 200 + 479);
+        assert_eq!(events[25].msg, MidiMessage::Stop);
+        assert_eq!(events[25].offset_ms, 700);
+        assert!(events.windows(2).all(|w| w[0].offset_ms <= w[1].offset_ms));
     }
 }

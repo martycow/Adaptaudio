@@ -40,11 +40,18 @@ pub const KNOWN_DEVICES: &[KnownDevice] = &[
         role: "Sampler groovebox: drums and lo-fi textures. Follows MIDI Clock.",
     },
     KnownDevice {
+        port_hint: "Scarlett",
+        friendly_name: "Focusrite Scarlett Solo",
+        default_channel: 1,
+        is_audio_interface: true,
+        role: "USB audio interface: input 1 is the microphone, input 2 the instrument or line.",
+    },
+    KnownDevice {
         port_hint: "H4essential",
         friendly_name: "Zoom H4essential",
         default_channel: 1,
         is_audio_interface: true,
-        role: "USB audio interface for Live and Capture, and field recorder.",
+        role: "Field recorder; also works as a USB audio interface.",
     },
 ];
 
@@ -86,6 +93,7 @@ mod tests {
             Some("EP-1320")
         );
         assert!(guess_device("H4essential").is_some_and(|d| d.is_audio_interface));
+        assert!(guess_device("Scarlett Solo USB").is_some_and(|d| d.is_audio_interface));
         assert_eq!(guess_device("IAC Driver Bus 1"), None);
     }
 

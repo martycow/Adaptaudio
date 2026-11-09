@@ -177,6 +177,7 @@ dependencies = [
  "aa-puzzle",
  "aa-theory",
  "rune",
+ "rune-kit",
  "serde",
  "serde_json",
 ]
@@ -1313,7 +1314,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.62.2",
+ "windows 0.54.0",
 ]
 
 [[package]]
@@ -2461,7 +2462,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
@@ -3049,6 +3050,16 @@ dependencies = [
  "xkbcommon",
  "zbus 6.2.1",
  "zeroize",
+]
+
+[[package]]
+name = "rune-kit"
+version = "0.0.1"
+source = "git+https://github.com/anomalyco/rune?rev=d751f07106eac47bdd4e33756dee71e1f593c9e2#d751f07106eac47bdd4e33756dee71e1f593c9e2"
+dependencies = [
+ "rune",
+ "rune-motion",
+ "unicode-segmentation",
 ]
 
 [[package]]

@@ -57,10 +57,24 @@ pub enum Command {
         velocity: f32,
         seconds: f32,
     },
+    /// A key went down on a hardware keyboard: the note sounds until [`Command::NoteOff`].
+    NoteOn {
+        track: usize,
+        pitch: u8,
+        velocity: f32,
+    },
+    /// The key came up.
+    NoteOff {
+        track: usize,
+        pitch: u8,
+    },
     SetMetronome(bool),
     /// Back to parameter defaults, no mode, nothing unlocked.
     ResetAdaptive,
 }
+
+/// The longest a key held on a hardware keyboard sounds, in case its release is lost.
+const HELD_NOTE_SECONDS: f32 = 30.0;
 
 /// What the audio thread tells the UI happened.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -427,6 +441,24 @@ impl Engine {
                 let note = Note::new(0, pitch, velocity, 1.0);
                 let gate = (seconds * self.sample_rate) as usize;
                 self.fire(track, &note, 0, DECK_ONESHOT, Some(gate), true);
+            }
+            Command::NoteOn {
+                track,
+                pitch,
+                velocity,
+            } => {
+                let note = Note::new(0, pitch, velocity, 1.0);
+                let gate = (HELD_NOTE_SECONDS * self.sample_rate) as usize;
+                self.fire(track, &note, 0, DECK_ONESHOT, Some(gate), true);
+            }
+            Command::NoteOff { track, pitch } => {
+                if let Some(rt) = self.tracks.get_mut(track) {
+                    for v in &mut rt.voices {
+                        if v.active && v.deck == DECK_ONESHOT && v.pitch == pitch {
+                            v.release();
+                        }
+                    }
+                }
             }
             Command::SetMetronome(on) => self.metronome = on,
             Command::ResetAdaptive => self.adaptive.reset(project),

@@ -201,3 +201,74 @@ fn locked_layers_open_when_their_event_fires() {
     engine.render_offline(4.0);
     assert!(controller.telemetry.tracks[bells].gain_mod.get() > 0.9);
 }
+
+#[test]
+fn a_held_note_sounds_until_its_key_comes_up() {
+    let base = demo();
+    let lead = base
+        .project
+        .tracks
+        .iter()
+        .position(|t| t.name == "Lead")
+        .unwrap();
+    let (mut engine, _c) = Engine::new(Arc::new(base.share()), SR);
+    engine.apply(Command::NoteOn {
+        track: lead,
+        pitch: 69,
+        velocity: 0.9,
+    });
+    let held = engine.render_offline(1.5);
+    let tail = &held[held.len() / 2..];
+    assert!(
+        rms(tail) > 1e-3,
+        "the note should still sound after a second"
+    );
+    engine.apply(Command::NoteOff {
+        track: lead,
+        pitch: 69,
+    });
+    let after = engine.render_offline(3.0);
+    let end = &after[after.len() * 3 / 4..];
+    assert!(
+        rms(end) < rms(tail) * 0.05,
+        "the note should fade after release"
+    );
+}
+
+#[test]
+fn external_tracks_send_notes_to_the_hardware_sink() {
+    use std::sync::Mutex;
+    let mut project = cedar_station();
+    let kick = project
+        .tracks
+        .iter()
+        .position(|t| t.name == "Kick")
+        .unwrap();
+    project.tracks[kick].instrument = aa_core::Instrument::External(aa_core::ExternalInstrument {
+        port_name: "Test synth".into(),
+        channel: 3,
+        latency_ms: 0.0,
+    });
+    let chase = project.mode_index("Chase").unwrap();
+    let base = LoadedProject::without_samples(project);
+    let (mut engine, _c) = Engine::new(Arc::new(base.share()), SR);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    engine.set_external_sink(Box::new(move |n| sink.lock().unwrap().push(n)));
+    // A key on the on-screen keyboard.
+    engine.apply(Command::PreviewNote {
+        track: kick,
+        pitch: 36,
+        velocity: 0.9,
+        seconds: 0.2,
+    });
+    engine.render_offline(0.1);
+    assert_eq!(seen.lock().unwrap().len(), 2, "a note on and its note off");
+    // The sequencer.
+    engine.apply(Command::RequestMode(chase));
+    engine.apply(Command::Play);
+    engine.render_offline(4.0);
+    let notes = seen.lock().unwrap();
+    assert!(notes.len() > 6, "the kick pattern reaches the synth");
+    assert!(notes.iter().all(|n| n.channel == 3 && n.track == kick));
+}

@@ -15,27 +15,23 @@ const UNDO_LIMIT: usize = 200;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Session,
-    Pattern,
     Sound,
     Capture,
     Mixer,
     Adaptive,
-    Simulator,
-    Puzzle,
+    Playtest,
     Learn,
     Settings,
 }
 
 impl Screen {
-    pub const ALL: [Screen; 10] = [
+    pub const ALL: [Screen; 8] = [
         Screen::Session,
-        Screen::Pattern,
         Screen::Sound,
         Screen::Capture,
         Screen::Mixer,
         Screen::Adaptive,
-        Screen::Simulator,
-        Screen::Puzzle,
+        Screen::Playtest,
         Screen::Learn,
         Screen::Settings,
     ];
@@ -43,28 +39,38 @@ impl Screen {
     pub fn name(self) -> &'static str {
         match self {
             Screen::Session => "Session",
-            Screen::Pattern => "Pattern",
             Screen::Sound => "Sound Lab",
             Screen::Capture => "Capture",
             Screen::Mixer => "Mixer",
             Screen::Adaptive => "Adaptive",
-            Screen::Simulator => "Simulator",
-            Screen::Puzzle => "Puzzle Lab",
+            Screen::Playtest => "Playtest",
             Screen::Learn => "Learn",
             Screen::Settings => "Settings",
+        }
+    }
+
+    /// What the screen is for, in a few words (the sidebar tooltip).
+    pub fn about(self) -> &'static str {
+        match self {
+            Screen::Session => "Write the music: tracks, sections and notes",
+            Screen::Sound => "Shape, save and load the sound of a track",
+            Screen::Capture => "Record hardware and microphones into the project",
+            Screen::Mixer => "Balance the tracks",
+            Screen::Adaptive => "Rules that connect the game to the music",
+            Screen::Playtest => "Listen to the project the way the game will play it",
+            Screen::Learn => "Music words in plain language",
+            Screen::Settings => "Devices, assistant, updates",
         }
     }
 
     pub fn glyph(self) -> &'static str {
         match self {
             Screen::Session => "▦",
-            Screen::Pattern => "▤",
             Screen::Sound => "∿",
             Screen::Capture => "◉",
             Screen::Mixer => "≡",
             Screen::Adaptive => "⟳",
-            Screen::Simulator => "✦",
-            Screen::Puzzle => "◈",
+            Screen::Playtest => "▶",
             Screen::Learn => "?",
             Screen::Settings => "⚙",
         }
@@ -80,7 +86,7 @@ pub struct Toast {
     pub born: f64,
 }
 
-/// A scenario the Simulator is playing.
+/// A scenario Playtest is playing.
 #[derive(Clone, Debug)]
 pub struct ScenarioRun {
     pub index: usize,
@@ -88,12 +94,24 @@ pub struct ScenarioRun {
     pub next_step: usize,
 }
 
-/// A line in the Simulator's event log.
+/// A line in Playtest's event log.
 #[derive(Clone, Debug)]
 pub struct LogLine {
     pub at: f64,
     pub text: String,
     pub color: Option<String>,
+}
+
+/// Which tab each screen shows.
+#[derive(Clone, Debug, Default)]
+pub struct Tabs {
+    pub adaptive: usize,
+    pub learn: usize,
+    pub learn_section: Option<String>,
+    pub settings: usize,
+    pub capture: usize,
+    /// The transition being edited on the Adaptive screen: (from mode, to mode).
+    pub transition: Option<(usize, usize)>,
 }
 
 pub struct App {
@@ -107,6 +125,8 @@ pub struct App {
     /// `None` when there is no audio device (or headless snapshots).
     pub audio: Option<AudioHost>,
     pub audio_error: Option<String>,
+    /// Why the MIDI output could not be opened, if it could not.
+    pub midi_error: Option<String>,
     /// Without an audio device the engine still runs here, silently, so the UI stays alive.
     pub offline: Option<Engine>,
     pub offline_clock: f64,
@@ -118,8 +138,16 @@ pub struct App {
     pub selected_clip: Option<ClipId>,
     pub selected_note: Option<usize>,
     pub selected_mode: usize,
-    pub selected_puzzle: usize,
+    /// The clip being auditioned in place of its section's clip: (track index, clip).
+    pub audition: Option<(usize, ClipId)>,
+    /// The project chooser shown at launch and by File → New.
+    pub wizard: Option<crate::screens::wizard::Wizard>,
+    pub tabs: Tabs,
+    /// Play/stop asked by the UI and not yet confirmed by the engine: (wanted, asked at).
+    transport_ask: Option<(bool, f64)>,
     pub sim_open: bool,
+    /// Key of the dropdown that is open, if any.
+    pub open_menu: Option<String>,
     pub assistant_open: bool,
     pub metronome: bool,
     pub now: f64,
@@ -170,6 +198,7 @@ impl App {
             controller,
             audio: None,
             audio_error: None,
+            midi_error: None,
             offline: None,
             offline_clock: 0.0,
             live,
@@ -179,8 +208,12 @@ impl App {
             selected_clip: None,
             selected_note: None,
             selected_mode: 0,
-            selected_puzzle: 0,
-            sim_open: true,
+            audition: None,
+            wizard: None,
+            tabs: Tabs::default(),
+            transport_ask: None,
+            sim_open: false,
+            open_menu: None,
             assistant_open: false,
             metronome: false,
             now: 0.0,
@@ -207,10 +240,8 @@ impl App {
                 app.offline = Some(engine);
             }
         }
-        if let Some(t) = app.project.tracks.first() {
-            app.selected_track = Some(t.id);
-            app.selected_clip = t.clips.first().map(|c| c.id);
-        }
+        app.ext.show_settings(&app.settings);
+        app.selected_track = app.project.tracks.first().map(|t| t.id);
         app
     }
 
@@ -336,11 +367,7 @@ impl App {
             .and_then(|(t, c)| self.project.clip(t, c))
             .is_some();
         if !clip_ok {
-            self.selected_clip = self
-                .selected_track
-                .and_then(|t| self.project.track(t))
-                .and_then(|t| t.clips.first())
-                .map(|c| c.id);
+            self.selected_clip = None;
             self.selected_note = None;
         }
     }
@@ -362,8 +389,13 @@ impl App {
         self.send(Command::SetProject(loaded));
         self.send(Command::ResetAdaptive);
         self.selected_track = None;
+        self.selected_clip = None;
+        self.audition = None;
         self.fix_selection();
         self.scenario = None;
+        self.playing = false;
+        self.transport_ask = Some((false, self.now));
+        self.log.clear();
     }
 
     // ------------------------------------------------------------------ selection helpers
@@ -377,13 +409,35 @@ impl App {
     // ------------------------------------------------------------------ transport and game
 
     pub fn toggle_play(&mut self) {
-        if self.playing {
+        self.set_playing(!self.playing);
+    }
+
+    /// The one place the transport starts and stops, so every Play button, key and menu item
+    /// shows the same state.
+    pub fn set_playing(&mut self, on: bool) {
+        if on {
+            self.send(Command::Play);
+        } else {
             self.send(Command::Stop);
             self.scenario = None;
-        } else {
-            self.send(Command::Play);
+            self.live.scenario.set([0.0, 0.0]);
         }
-        self.playing = !self.playing;
+        self.playing = on;
+        self.transport_ask = Some((on, self.now));
+    }
+
+    /// Plays `clip` in place of the section's clip on its track, or stops doing so.
+    pub fn set_audition(&mut self, audition: Option<(usize, ClipId)>) {
+        if let Some((track, _)) = self.audition.filter(|a| Some(*a) != audition) {
+            self.send(Command::SetClipOverride { track, clip: None });
+        }
+        if let Some((track, clip)) = audition {
+            self.send(Command::SetClipOverride {
+                track,
+                clip: Some(clip),
+            });
+        }
+        self.audition = audition;
     }
 
     pub fn request_mode(&mut self, mode: usize) {
@@ -476,9 +530,22 @@ impl App {
             self.pending_mode = pending;
             changed = true;
         }
+        // The engine answers a moment after the UI asks: until it does (or half a second
+        // passes), what the UI asked for stands, so buttons never flicker back.
         let playing = t.is_playing();
-        if playing != self.playing && (self.audio.is_some() || self.offline.is_some()) {
+        if let Some((wanted, at)) = self.transport_ask
+            && (playing == wanted || self.now - at > 0.5)
+        {
+            self.transport_ask = None;
+        }
+        if self.transport_ask.is_none()
+            && playing != self.playing
+            && (self.audio.is_some() || self.offline.is_some())
+        {
             self.playing = playing;
+            if !playing {
+                self.scenario = None;
+            }
             changed = true;
         }
         let fired = t.fired.load(std::sync::atomic::Ordering::Relaxed);

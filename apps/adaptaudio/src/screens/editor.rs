@@ -1,27 +1,14 @@
-//! The pattern editor: a step grid for drums, a scale-locked piano roll for everything else,
-//! and helpers that write notes for you.
+//! The note editor under the Session grid: a step grid for drums, a scale-locked piano roll for
+//! everything else, and helpers that write notes for you.
 
-use super::common::empty_state;
 use crate::state::App;
 use crate::theme::{self, font};
-use crate::widgets::{button, caps, label, live_bar, screen_header, segmented, slider_row, toggle};
+use crate::widgets::{button, caps, label, live_bar, segmented, slider_row, toggle};
 use aa_core::music::note_name;
 use aa_core::{Clip, ClipId, Note, Project, TrackId};
 use aa_engine::Command;
 use aa_theory::{ArpPattern, BassStyle, Contour, Mood, Rng};
-use rune::{Color, El, KeyEvent, col, el, row, text};
-
-pub fn view(s: &App, accent: Color) -> El {
-    col()
-        .key("pattern-screen")
-        .w_full()
-        .h_full()
-        .padding(22.0)
-        .gap(16.0)
-        .min_h(0.0)
-        .child(screen_header("Pattern", "Click cells to add notes. Notes snap to the scale while Scale lock is on — no wrong notes.", accent))
-        .child(col().grow(1.0).min_h(0.0).child(editor(s, accent, false)))
-}
+use rune::{Color, El, col, el, row, text};
 
 /// Rows of the grid, top to bottom.
 fn rows_for(p: &Project, track: &aa_core::Track, clip: &Clip, compact: bool) -> Vec<u8> {
@@ -62,20 +49,13 @@ fn rows_for(p: &Project, track: &aa_core::Track, clip: &Clip, compact: bool) -> 
         .collect()
 }
 
-pub fn editor(s: &App, accent: Color, compact: bool) -> El {
+/// The editor for the selected clip, or `None` when no clip is selected.
+pub fn editor(s: &App, accent: Color) -> Option<El> {
     let p = &s.project;
-    let (Some(tid), Some(cid)) = (s.selected_track, s.selected_clip) else {
-        return empty_state("No clip selected", "Pick a clip on the Session screen.");
-    };
-    let Some(track) = p.track(tid) else {
-        return empty_state("No track", "");
-    };
-    let Some(clip) = track.clip(cid) else {
-        return empty_state(
-            "This track has no clip yet",
-            "Click a “+” cell on the Session screen to make one.",
-        );
-    };
+    let (tid, cid) = (s.selected_track?, s.selected_clip?);
+    let track = p.track(tid)?;
+    let clip = track.clip(cid)?;
+    let compact = s.settings.editor_height < 300.0;
     let ti = p.track_index(tid).unwrap_or(0);
     let color = theme::role_color(track.role);
     let rows = rows_for(p, track, clip, compact);
@@ -190,14 +170,8 @@ pub fn editor(s: &App, accent: Color, compact: bool) -> El {
         }
         grid = grid.child(line);
     }
-    let grid = col()
-        .grow(1.0)
-        .min_h(0.0)
-        .min_w(0.0)
-        .scroll_xy()
-        .child(grid);
+    let grid = crate::widgets::xyscroll(grid);
 
-    let audition = s.clip_playing.get(ti) == Some(&cid);
     let header = row()
         .gap(10.0)
         .items_center()
@@ -243,25 +217,28 @@ pub fn editor(s: &App, accent: Color, compact: bool) -> El {
             toggle(
                 "audition",
                 "Audition",
-                s.ext.puzzle.audition == Some((ti, cid)),
+                s.audition == Some((ti, cid)),
                 accent,
                 move |s: &mut App| {
-                    let on = s.ext.puzzle.audition == Some((ti, cid));
-                    s.ext.puzzle.audition = if on { None } else { Some((ti, cid)) };
-                    s.send(Command::SetClipOverride {
-                        track: ti,
-                        clip: if on { None } else { Some(cid) },
-                    });
+                    let on = s.audition == Some((ti, cid));
+                    s.set_audition(if on { None } else { Some((ti, cid)) });
                     if !on && !s.playing {
-                        s.toggle_play();
+                        s.set_playing(true);
                     }
                 },
             )
             .help("Play this clip in place of the section's clip on this track"),
         );
-    let _ = audition;
+    let header = header.child(
+        button("editor-close", "✕ Close", accent, false)
+            .help("Close the editor (Esc)")
+            .on_press(|s: &mut App| {
+                s.selected_clip = None;
+                s.selected_note = None;
+            }),
+    );
 
-    let mut out = col()
+    let out = col()
         .key("editor")
         .w_full()
         .h_full()
@@ -269,19 +246,16 @@ pub fn editor(s: &App, accent: Color, compact: bool) -> El {
         .min_h(0.0)
         .child(header)
         .child(helpers(s, tid, cid, clip, accent));
-    if compact {
-        out = out.child(grid);
-    } else {
-        out = out.child(
+    Some(
+        out.child(
             row()
                 .grow(1.0)
                 .min_h(0.0)
                 .gap(14.0)
                 .child(col().grow(1.0).min_w(0.0).min_h(0.0).child(grid))
                 .child(inspector(s, tid, cid, clip, accent)),
-        );
-    }
-    out
+        ),
+    )
 }
 
 fn press_cell(s: &mut App, track: TrackId, clip: ClipId, step: u16, pitch: u8) {
@@ -322,6 +296,9 @@ fn press_cell(s: &mut App, track: TrackId, clip: ClipId, step: u16, pitch: u8) {
                 }
             });
             s.selected_note = index;
+            if !s.settings.preview_notes {
+                return;
+            }
             s.send(Command::PreviewNote {
                 track: ti,
                 pitch,
@@ -336,11 +313,10 @@ fn inspector(s: &App, track: TrackId, clip: ClipId, c: &Clip, accent: Color) -> 
     let mut panel = col()
         .key("note-inspector")
         .w(300.0)
-        .gap(12.0)
+        .gap(10.0)
         .padding(14.0)
-        .radius(14.0)
-        .fill(theme::card())
-        .border(1.0, theme::line());
+        .radius(12.0)
+        .fill(theme::card());
     panel = panel.child(caps("Clip"));
     panel = panel.child(slider_row(
         "swing",
@@ -580,8 +556,4 @@ fn replace_notes(s: &mut App, track: TrackId, clip: ClipId, notes: Vec<Note>, wh
     });
     s.selected_note = None;
     s.toast(what);
-}
-
-pub fn on_key(_s: &mut App, _ev: &KeyEvent) -> bool {
-    false
 }

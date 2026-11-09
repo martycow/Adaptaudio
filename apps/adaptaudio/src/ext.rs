@@ -28,9 +28,27 @@ pub struct Extras {
     pub export_busy: bool,
     pub export_rx: Option<Receiver<Result<String, String>>>,
     pub export_last: Option<String>,
-    pub puzzle: crate::screens::puzzle::PuzzlePlay,
     pub seed: u64,
     pub capture: crate::screens::capture::CaptureUi,
+    pub devices: crate::devices::Devices,
+    /// The sound library on disk, re-read after every save and delete.
+    pub sounds: Vec<crate::library::Saved>,
+    pub sound_name: rune::TextEdit,
+    /// The saved sound waiting for a second click on Delete.
+    pub confirm_delete: Option<PathBuf>,
+    pub update: crate::screens::settings::UpdateUi,
+    pub repo_input: rune::TextEdit,
+    pub model_input: rune::TextEdit,
+    pub base_url_input: rune::TextEdit,
+}
+
+impl Extras {
+    /// Fills the Settings text fields from what is saved.
+    pub fn show_settings(&mut self, settings: &crate::settings::Settings) {
+        self.repo_input = rune::TextEdit::new(settings.update_repo.clone());
+        self.model_input = rune::TextEdit::new(settings.assistant_model.clone());
+        self.base_url_input = rune::TextEdit::new(settings.assistant_base_url.clone());
+    }
 }
 
 impl Default for Extras {
@@ -45,9 +63,18 @@ impl Default for Extras {
             export_busy: false,
             export_rx: None,
             export_last: None,
-            puzzle: Default::default(),
             seed: 0xCEDA_5747,
             capture: Default::default(),
+            devices: Default::default(),
+            sounds: crate::library::dir()
+                .map(|d| crate::library::list(&d))
+                .unwrap_or_default(),
+            sound_name: rune::TextEdit::new(""),
+            confirm_delete: None,
+            update: Default::default(),
+            repo_input: rune::TextEdit::new(""),
+            model_input: rune::TextEdit::new(""),
+            base_url_input: rune::TextEdit::new(""),
         }
     }
 }
@@ -113,8 +140,9 @@ pub fn poll(s: &mut App, now: f64, tx: &mut rune::Tx) -> bool {
             }
         }
     }
-    changed |= crate::screens::puzzle::poll(s, now, tx);
+    changed |= crate::devices::poll(s);
     changed |= crate::screens::capture::poll(s, now, tx);
+    changed |= crate::screens::settings::poll(s, tx);
     changed
 }
 
@@ -128,7 +156,14 @@ pub fn ask(s: &mut App) {
     let Some(mut assistant) = s.ext.assistant.take() else {
         return;
     };
+    let provider =
+        aa_assistant::Provider::from_id(&s.settings.assistant_provider).unwrap_or_default();
+    if assistant.provider != provider {
+        assistant.set_provider(provider);
+    }
     assistant.model = s.settings.assistant_model.clone();
+    assistant.base_url =
+        Some(s.settings.assistant_base_url.trim().to_string()).filter(|u| !u.is_empty());
     s.ext.chat_input = rune::TextEdit::new("");
     s.ext.chat.push(ChatMessage {
         from_user: true,

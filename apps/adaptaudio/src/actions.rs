@@ -68,7 +68,7 @@ pub fn start_scenario(s: &mut App, index: usize) {
     }
     s.send(Command::ResetAdaptive);
     if !s.playing {
-        s.toggle_play();
+        s.set_playing(true);
     }
     s.scenario = Some(ScenarioRun {
         index,
@@ -157,16 +157,16 @@ pub fn toggle_metronome(s: &mut App) {
     let _ = s.settings.save();
 }
 
-pub fn cycle_scale(s: &mut App, dir: i32) {
-    let all = ScaleKind::ALL;
-    let i = all.iter().position(|k| *k == s.project.scale).unwrap_or(0) as i32;
-    let next = all[(i + dir).rem_euclid(all.len() as i32) as usize];
+pub fn set_scale(s: &mut App, index: usize) {
+    let Some(next) = ScaleKind::ALL.get(index).copied() else {
+        return;
+    };
     s.edit(|p| p.scale = next);
     s.toast(&format!("Scale: {} — {}", next.name(), next.mood()));
 }
 
-pub fn cycle_key(s: &mut App, dir: i32) {
-    let next = PitchClass::new(i32::from(s.project.key.0) + dir);
+pub fn set_key(s: &mut App, index: usize) {
+    let next = PitchClass::new(index as i32);
     s.edit(|p| p.key = next);
 }
 
@@ -187,10 +187,21 @@ pub fn save(s: &mut App, tx: &mut Tx) {
     }
 }
 
-pub fn save_as(_: &mut App, tx: &mut Tx) {
+/// A file name made from the project's name.
+fn file_name(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+        .collect();
+    let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    let stem = if clean.is_empty() { "Project" } else { &clean };
+    format!("{stem}.{}", aa_core::io::EXTENSION)
+}
+
+pub fn save_as(s: &mut App, tx: &mut Tx) {
     let options = FileDialogOptions {
         title: "Save project".into(),
-        file_name: Some("CedarStation.aaproj".into()),
+        file_name: Some(file_name(&s.project.name)),
         ..Default::default()
     };
     tx.save_file(options, |s: &mut App, result, _| match result {
@@ -208,7 +219,7 @@ fn write(s: &mut App, path: &std::path::Path) {
         Ok(dir) => {
             s.path = Some(dir.clone());
             s.dirty = false;
-            s.settings.last_project = Some(dir.clone());
+            s.settings.remember_project(&dir);
             let _ = s.settings.save();
             s.toast(&format!("Saved {}", dir.display()));
         }
@@ -233,8 +244,9 @@ pub fn open(s: &mut App, path: &std::path::Path) {
         Ok(project) => {
             let dir = aa_core::io::project_dir(path);
             s.replace_project(project, Some(dir.clone()));
-            s.settings.last_project = Some(dir);
+            s.settings.remember_project(&dir);
             let _ = s.settings.save();
+            s.wizard = None;
             s.toast("Project opened");
         }
         Err(e) => s.toast_error(&format!("Can't open: {e}")),
@@ -245,6 +257,23 @@ pub fn new_demo(s: &mut App) {
     s.replace_project(aa_core::demo::cedar_station(), None);
     s.dirty = true;
     s.toast("Started from the Cedar Station demo");
+}
+
+/// File → New: the project chooser on its "new project" page.
+pub fn new_project(s: &mut App, _: &mut Tx) {
+    s.open_menu = None;
+    s.wizard = Some(crate::screens::wizard::Wizard::new_project());
+}
+
+/// Makes the project the wizard describes, then asks where to keep it.
+pub fn create_from_wizard(s: &mut App, tx: &mut Tx) {
+    let Some(w) = s.wizard.take() else {
+        return;
+    };
+    s.replace_project(w.build(), None);
+    s.dirty = true;
+    s.screen = Screen::Session;
+    save_as(s, tx);
 }
 
 pub fn export_dialog(s: &mut App, tx: &mut Tx) {
@@ -277,6 +306,10 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
         return false;
     }
     let m = ev.mods;
+    // While the project chooser is up, only file shortcuts work.
+    if s.wizard.is_some() && !matches!(&ev.key, Key::Command('o') | Key::Command('n')) {
+        return false;
+    }
     match &ev.key {
         Key::Text(t) if t == " " && !m.cmd => {
             s.toggle_play();
@@ -311,6 +344,10 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             }
             true
         }
+        Key::Command('n') => {
+            new_project(s, tx);
+            true
+        }
         Key::Command('o') => {
             open_dialog(s, tx);
             true
@@ -331,7 +368,13 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
             true
         }
         Key::Escape => {
-            if s.assistant_open {
+            if s.open_menu.take().is_some() {
+                true
+            } else if s.selected_clip.is_some() && s.screen == Screen::Session {
+                s.selected_clip = None;
+                s.selected_note = None;
+                true
+            } else if s.assistant_open {
                 s.assistant_open = false;
                 true
             } else if s.scenario.is_some() {
@@ -341,6 +384,6 @@ pub fn on_key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
                 false
             }
         }
-        _ => crate::screens::puzzle::on_key(s, ev) || crate::screens::pattern::on_key(s, ev),
+        _ => false,
     }
 }

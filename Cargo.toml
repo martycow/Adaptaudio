@@ -39,6 +39,8 @@ hound = "3.5"
 
 # Rune is pre-release: pinned to one revision of `dev`. Bump it only as a separate change.
 rune = { git = "https://github.com/anomalyco/rune", rev = "d751f07106eac47bdd4e33756dee71e1f593c9e2", features = ["native-file-dialog"] }
+# Rune's component kit (select, scroll bars, dialogs): same repository, same pinned revision.
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "d751f07106eac47bdd4e33756dee71e1f593c9e2" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

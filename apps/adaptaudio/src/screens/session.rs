@@ -1,12 +1,12 @@
 //! Session: tracks × sections. Each cell is a clip; the game decides which column plays.
 
-use super::common::{clip_preview, empty_state};
-use crate::state::{App, Screen};
+use super::common::clip_preview;
+use crate::state::App;
 use crate::theme::{self, font};
-use crate::widgets::{caps, live_bar, live_meter, screen_header, slider, toggle};
+use crate::widgets::{caps, live_bar, live_meter, screen_header, slider, toggle, xyscroll};
 use aa_core::{Clip, TrackRole};
 use aa_engine::Command;
-use rune::{Color, El, col, el, row, text};
+use rune::{Color, Drag, El, Phase, Tx, col, el, row, text};
 
 const TRACK_W: f32 = 236.0;
 const CELL_W: f32 = 148.0;
@@ -59,8 +59,8 @@ pub fn view(s: &App, accent: Color) -> El {
             .press_scale(0.96)
             .on_press(move |s: &mut App| {
                 s.send(Command::LaunchSection(id));
-                if !s.playing {
-                    s.toggle_play();
+                if !s.playing && s.settings.play_on_launch {
+                    s.set_playing(true);
                 }
             })
             .child(
@@ -95,34 +95,69 @@ pub fn view(s: &App, accent: Color) -> El {
     }
     grid = grid.child(add_track_row(accent));
 
-    let editor = match (s.selected_track, s.selected_clip) {
-        (Some(_), Some(_)) => super::pattern::editor(s, accent, true),
-        _ => empty_state(
-            "Pick a clip",
-            "Click a cell to edit its notes below; double-click opens the full Pattern screen.",
-        ),
-    };
-
-    col()
+    let mut out = col()
         .key("session")
         .w_full()
         .h_full()
         .padding(22.0)
-        .gap(16.0)
+        .pb(0.0)
+        .gap(14.0)
         .min_h(0.0)
         .child(screen_header(
             "Session",
-            "Every column is a section the game can switch to. Every cell is a clip on a track.",
+            "Columns are sections the game switches between. Rows are tracks. Click a clip to edit its notes below.",
             accent,
         ))
-        .child(col().grow(1.0).min_h(0.0).scroll_xy().child(grid))
-        .child(
+        .child(xyscroll(grid).pb(14.0));
+    // The editor appears only while a clip is selected; the bar above it resizes it.
+    if let Some(editor) = super::editor::editor(s, accent) {
+        out = out.child(divider(accent)).child(
             col()
                 .key("session-editor")
-                .h(300.0)
+                .h(s.settings.editor_height)
                 .min_h(0.0)
+                .pt(12.0)
+                .pb(16.0)
+                .transition(rune::Transition::offset(0.0, 16.0))
                 .child(editor),
-        )
+        );
+    }
+    out
+}
+
+/// The line between the grid and the editor. Drag it to resize the editor.
+fn divider(accent: Color) -> El {
+    col()
+        .key("session-divider")
+        .role("separator")
+        .label("Resize the editor")
+        .help("Drag to resize the editor")
+        .w_full()
+        .h(11.0)
+        .justify_center()
+        .items_center()
+        .cursor(rune::Cursor::ResizeRow)
+        .hover(accent.alpha(0.12))
+        .child(el().w_full().h(1.0).fill(theme::line_strong()))
+        .child(el().size(44.0, 4.0).radius(2.0).fill(theme::faint()).pin(
+            None,
+            Some(3.5),
+            None,
+            None,
+        ))
+        .on_drag(|s: &mut App, d: &mut Drag, _: &mut Tx| {
+            if d.phase == Phase::Down {
+                d.data = s.settings.editor_height;
+            }
+            if d.cancelled() {
+                s.settings.editor_height = d.data;
+                return;
+            }
+            s.settings.editor_height = (d.data - d.dy).clamp(180.0, 640.0);
+            if d.phase == Phase::Up {
+                let _ = s.settings.save();
+            }
+        })
 }
 
 fn track_header(s: &App, index: usize, accent: Color) -> El {
@@ -160,14 +195,8 @@ fn track_header(s: &App, index: usize, accent: Color) -> El {
             },
         )
         .on_press(move |s: &mut App| {
-            let first = s
-                .project
-                .track(id)
-                .and_then(|t| t.clips.first())
-                .map(|c| c.id);
-            let keep = s.selected_track == Some(id);
-            if !keep {
-                s.select_clip(id, first);
+            if s.selected_track != Some(id) {
+                s.select_clip(id, None);
             }
         })
         .child(el().w(4.0).h(CELL_H - 18.0).radius(2.0).fill(color))
@@ -284,9 +313,9 @@ fn cell(s: &App, index: usize, section: u32, clip: Option<&Clip>, accent: Color)
             .w(CELL_W)
             .h(CELL_H)
             .center()
-            .radius(12.0)
+            .radius(10.0)
             .border(1.0, theme::line())
-            .border_dash(5.0, 4.0)
+            .border_dash(4.0, 4.0)
             .hover(theme::hover())
             .on_press(move |s: &mut App| {
                 new_clip(s, tid, section, role, &track_name, &section_name)
@@ -302,7 +331,7 @@ fn cell(s: &App, index: usize, section: u32, clip: Option<&Clip>, accent: Color)
                 .key(key)
                 .role("button")
                 .label(c.name.clone())
-                .help(format!("{} — {} steps, {} notes. Double-click to open; right-click to take it out of this section.", c.name, c.length_steps, c.notes.len()))
+                .help(format!("{} — {} steps, {} notes. Click to edit its notes; right-click to take it out of this section.", c.name, c.length_steps, c.notes.len()))
                 .w(CELL_W)
                 .h(CELL_H)
                 .px(10.0)
@@ -314,10 +343,10 @@ fn cell(s: &App, index: usize, section: u32, clip: Option<&Clip>, accent: Color)
                 .hover(theme::hover())
                 .press_scale(0.97)
                 .motion(rune::tok::motion::SNAPPY)
-                .on_press(move |s: &mut App| s.select_clip(tid, Some(cid)))
-                .on_double_press(move |s: &mut App| {
-                    s.select_clip(tid, Some(cid));
-                    s.screen = Screen::Pattern;
+                .on_press(move |s: &mut App| {
+                    // A second click on the open clip closes the editor.
+                    let open = s.selected_track == Some(tid) && s.selected_clip == Some(cid);
+                    s.select_clip(tid, (!open).then_some(cid));
                 })
                 .on_secondary_press(move |s: &mut App, _, _| s.edit(|p| p.set_slot(section, tid, None)))
                 .child(text(c.name.clone()).font(font::LABEL).color(theme::text()).truncate())

@@ -1,28 +1,51 @@
-//! The Anthropic API key lives in the macOS Keychain, never in the project.
+//! API keys live in the macOS Keychain, never in the project: one item per [`Provider`].
 //!
 //! The key never appears in a process argument list: reading uses `security … -w`, which prints
 //! it on stdout, and storing feeds the command to `security -i` on stdin.
 
 use crate::error::AssistantError;
+use crate::provider::Provider;
 use std::io::{ErrorKind, Write};
 use std::process::{Command, Stdio};
 
-/// Keychain service name of the stored key.
+/// Keychain service name of the stored Anthropic key
+/// (see [`Provider::keychain_service`] for the others).
 pub const KEYCHAIN_SERVICE: &str = "adaptaudio-anthropic";
 const KEYCHAIN_ACCOUNT: &str = "adaptaudio";
 const SECURITY: &str = "/usr/bin/security";
-/// Development override; wins over the Keychain when set and non-empty.
+/// Development override for the Anthropic key; wins over the Keychain when set and non-empty
+/// (see [`Provider::key_env`] for the others).
 pub const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
 /// `security` exit status for "item not found".
 const ITEM_NOT_FOUND: i32 = 44;
 
-/// The key to send: the env override if set, otherwise the Keychain item.
+/// The Anthropic key. Same as `api_key_for(Provider::Anthropic)`.
 pub fn api_key() -> Result<String, AssistantError> {
-    if let Some(key) = env_key() {
+    api_key_for(Provider::Anthropic)
+}
+
+/// True when an Anthropic key is available. Same as `has_api_key_for(Provider::Anthropic)`.
+pub fn has_api_key() -> bool {
+    has_api_key_for(Provider::Anthropic)
+}
+
+/// Saves the Anthropic key. Same as `store_api_key_for(Provider::Anthropic, key)`.
+pub fn store_api_key(key: &str) -> Result<(), AssistantError> {
+    store_api_key_for(Provider::Anthropic, key)
+}
+
+/// The key to send to `provider`: the env override if set, otherwise the Keychain item.
+pub fn api_key_for(provider: Provider) -> Result<String, AssistantError> {
+    if let Some(key) = env_key(provider) {
         return check_key_format(&key).map(|()| key);
     }
     let output = Command::new(SECURITY)
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            provider.keychain_service(),
+            "-w",
+        ])
         .stdin(Stdio::null())
         .output()
         .map_err(security_spawn_error)?;
@@ -41,12 +64,12 @@ pub fn api_key() -> Result<String, AssistantError> {
 }
 
 /// True when a key is available (env override or Keychain item). Does not read the secret.
-pub fn has_api_key() -> bool {
-    if env_key().is_some() {
+pub fn has_api_key_for(provider: Provider) -> bool {
+    if env_key(provider).is_some() {
         return true;
     }
     Command::new(SECURITY)
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE])
+        .args(["find-generic-password", "-s", provider.keychain_service()])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -54,8 +77,8 @@ pub fn has_api_key() -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// Saves (or replaces) the key in the login Keychain.
-pub fn store_api_key(key: &str) -> Result<(), AssistantError> {
+/// Saves (or replaces) the provider's key in the login Keychain.
+pub fn store_api_key_for(provider: Provider, key: &str) -> Result<(), AssistantError> {
     let key = key.trim();
     check_key_format(key)?;
     let mut child = Command::new(SECURITY)
@@ -67,7 +90,7 @@ pub fn store_api_key(key: &str) -> Result<(), AssistantError> {
         .map_err(security_spawn_error)?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
-            .write_all(add_command(key).as_bytes())
+            .write_all(add_command(provider, key).as_bytes())
             .map_err(|e| AssistantError::Keychain(e.to_string()))?;
     }
     let output = child
@@ -82,10 +105,16 @@ pub fn store_api_key(key: &str) -> Result<(), AssistantError> {
 
 /// The interactive-mode line that stores the key. Only safe for keys that passed
 /// [`check_key_format`], which rules out quotes and whitespace.
-fn add_command(key: &str) -> String {
+fn add_command(provider: Provider, key: &str) -> String {
+    let service = provider.keychain_service();
+    let label = match provider {
+        Provider::Anthropic => "Anthropic",
+        Provider::OpenAi => "OpenAI",
+        Provider::Qwen => "Qwen",
+    };
     format!(
-        "add-generic-password -U -a {KEYCHAIN_ACCOUNT} -s {KEYCHAIN_SERVICE} \
-         -l \"Adaptaudio Anthropic API key\" -w \"{key}\"\n"
+        "add-generic-password -U -a {KEYCHAIN_ACCOUNT} -s {service} \
+         -l \"Adaptaudio {label} API key\" -w \"{key}\"\n"
     )
 }
 
@@ -104,8 +133,8 @@ pub(crate) fn check_key_format(key: &str) -> Result<(), AssistantError> {
     }
 }
 
-fn env_key() -> Option<String> {
-    std::env::var(API_KEY_ENV)
+fn env_key(provider: Provider) -> Option<String> {
+    std::env::var(provider.key_env())
         .ok()
         .map(|k| k.trim().to_string())
         .filter(|k| !k.is_empty())
@@ -149,10 +178,23 @@ mod tests {
 
     #[test]
     fn add_command_is_one_line_with_the_service_name() {
-        let line = add_command("sk-ant-test");
+        let line = add_command(Provider::Anthropic, "sk-ant-test");
         assert!(line.starts_with("add-generic-password -U "));
         assert!(line.contains("-s adaptaudio-anthropic"));
         assert!(line.ends_with("-w \"sk-ant-test\"\n"));
         assert_eq!(line.matches('\n').count(), 1);
+    }
+
+    #[test]
+    fn every_provider_has_its_own_keychain_item_and_env_override() {
+        assert_eq!(Provider::Anthropic.keychain_service(), KEYCHAIN_SERVICE);
+        assert_eq!(Provider::Anthropic.key_env(), API_KEY_ENV);
+        let mut services: Vec<&str> = Provider::ALL.iter().map(|p| p.keychain_service()).collect();
+        services.sort_unstable();
+        services.dedup();
+        assert_eq!(services.len(), Provider::ALL.len());
+        let line = add_command(Provider::Qwen, "sk-test");
+        assert!(line.contains("-s adaptaudio-qwen "));
+        assert!(line.contains("-l \"Adaptaudio Qwen API key\""));
     }
 }

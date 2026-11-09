@@ -2,8 +2,9 @@
 //!
 //! Explains terms, suggests chords, melodies and rhythms, and writes patterns from a text
 //! description. It only *proposes* edits as [`Action`]s; the app applies them through its
-//! undoable commands. Requests go to the Claude Messages API through the system `curl`
-//! ([`CurlTransport`]); the API key lives in the macOS Keychain ([`store_api_key`]).
+//! undoable commands. Requests go through the system `curl` ([`CurlTransport`]) to the
+//! chosen [`Provider`]: the Claude Messages API, or the OpenAI-compatible Chat Completions
+//! API of OpenAI and Qwen. API keys live in the macOS Keychain ([`store_api_key_for`]).
 //!
 //! Everything blocks: call [`Assistant::ask`] from a worker thread.
 
@@ -11,7 +12,9 @@ mod actions;
 mod assistant;
 mod error;
 mod keychain;
+mod openai;
 mod prompt;
+mod provider;
 mod summary;
 mod transport;
 
@@ -24,10 +27,16 @@ pub use assistant::{
     MAX_ROUNDS, Reply, Turn,
 };
 pub use error::AssistantError;
-pub use keychain::{API_KEY_ENV, KEYCHAIN_SERVICE, api_key, has_api_key, store_api_key};
+pub use keychain::{
+    API_KEY_ENV, KEYCHAIN_SERVICE, api_key, api_key_for, has_api_key, has_api_key_for,
+    store_api_key, store_api_key_for,
+};
 pub use prompt::SYSTEM_PROMPT;
+pub use provider::Provider;
 pub use summary::{clip_notes_text, project_summary};
-pub use transport::{ANTHROPIC_VERSION, CurlTransport, MESSAGES_URL, Transport, required_betas};
+pub use transport::{
+    ANTHROPIC_VERSION, ApiRequest, CurlTransport, MESSAGES_URL, Transport, required_betas,
+};
 
 #[cfg(test)]
 mod tests;

@@ -83,6 +83,8 @@ pub struct CaptureProgress {
     samples_total: AtomicU64,
     overruns: AtomicU32,
     cancel: AtomicBool,
+    finish: AtomicBool,
+    peak: AtomicU32,
 }
 
 impl CaptureProgress {
@@ -116,6 +118,23 @@ impl CaptureProgress {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// Asks a running [`CaptureSession::record_audio`] to stop now and keep what it has.
+    pub fn finish(&self) {
+        self.finish.store(true, Ordering::Relaxed);
+    }
+
+    /// The loudest input sample since the last call, 0..1 (an input level meter).
+    pub fn take_peak(&self) -> f32 {
+        f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
+    }
+
+    fn note_peak(&self, samples: &[f32]) {
+        let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        if peak > f32::from_bits(self.peak.load(Ordering::Relaxed)) {
+            self.peak.store(peak.to_bits(), Ordering::Relaxed);
+        }
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
@@ -129,6 +148,8 @@ impl CaptureProgress {
             .store(samples_total as u64, Ordering::Relaxed);
         self.overruns.store(0, Ordering::Relaxed);
         self.cancel.store(false, Ordering::Relaxed);
+        self.finish.store(false, Ordering::Relaxed);
+        self.peak.store(0, Ordering::Relaxed);
     }
 }
 
@@ -196,6 +217,25 @@ impl CaptureSession {
             total_ms + TAIL_MS,
             sender,
         )
+    }
+
+    /// Records the input for up to `max_ms` with no MIDI involved: a groovebox, a microphone, a
+    /// field recorder. [`CaptureProgress::finish`] ends it early and keeps what was recorded;
+    /// [`CaptureProgress::cancel`] throws it away.
+    pub fn record_audio(&self, max_ms: u64) -> Result<Recording, CaptureError> {
+        let mut nobody = |_: MidiMessage| {};
+        self.record(&[], 0, max_ms, &mut nobody)
+    }
+
+    /// Records `length_ms` of input while sending `events` (MIDI Start, clock ticks, Stop) to a
+    /// groovebox so its pattern plays in time with the recording.
+    pub fn record_synced(
+        &self,
+        events: &[TimedMidi],
+        length_ms: u64,
+        sender: &mut dyn NoteSender,
+    ) -> Result<Recording, CaptureError> {
+        self.record(events, 0, length_ms, sender)
     }
 
     /// Plays one note and measures, in milliseconds, how long it takes to come back on the
@@ -316,9 +356,14 @@ impl CaptureSession {
             let available = consumer.slots().min(target - samples.len());
             if let Ok(chunk) = consumer.read_chunk(available) {
                 let (a, b) = chunk.as_slices();
+                self.progress.note_peak(a);
+                self.progress.note_peak(b);
                 samples.extend_from_slice(a);
                 samples.extend_from_slice(b);
                 chunk.commit_all();
+            }
+            if self.progress.finish.load(Ordering::Relaxed) && !samples.is_empty() {
+                break Ok(());
             }
             // Keep the ring empty even after the target is reached.
             if samples.len() >= target {

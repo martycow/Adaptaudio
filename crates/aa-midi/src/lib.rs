@@ -4,7 +4,7 @@
 //! - [`MidiOut`] / [`MidiIn`]: open real ports by part of their name.
 //! - [`MidiScheduler`]: a thread that sends queued messages at exact times.
 //! - [`ClockGenerator`] / [`MidiClockSender`]: MIDI Clock so hardware follows our tempo.
-//! - [`KNOWN_DEVICES`] / [`guess_device`]: recognise the Hydrasynth, MiniFreak, EP-1320, H4essential.
+//! - [`KNOWN_DEVICES`] / [`guess_device`]: recognise the Hydrasynth, MiniFreak, EP-1320, Scarlett Solo, H4essential.
 //!
 //! Functions that touch devices return a [`MidiError`] when nothing is connected.
 

@@ -1,4 +1,4 @@
-//! The Simulator: play the game's role. Drag the XY pad, press modes and events, run scenarios.
+//! Playtest: listen to the project the way the game will play it. Drag the XY pad, press modes and events, run scenarios.
 
 use crate::actions;
 use crate::live::{PAD_BIG, PAD_SMALL};
@@ -15,29 +15,46 @@ pub fn panel(s: &App, accent: Color) -> El {
         .h_full()
         .fill(theme::panel())
         .border_sides([1.0, 0.0, 0.0, 0.0], theme::line())
-        .child(
+        .child(crate::widgets::vscroll(
             col()
-                .grow(1.0)
-                .min_h(0.0)
-                .scroll(rune::el::ScrollSpec {
-                    stick_bottom: false,
-                })
-                .child(
-                    col()
-                        .padding(20.0)
-                        .gap(16.0)
-                        .child(now_playing(s, accent))
-                        .child(pad(s, accent, false))
-                        .child(params(s, accent, PAD_SMALL))
-                        .child(modes(s, 2))
-                        .child(events(s, accent))
-                        .child(scenarios(s, accent))
-                        .child(log(s, 6)),
-                ),
+                .padding(20.0)
+                .gap(16.0)
+                .child(now_playing(s, accent))
+                .child(pad(s, accent, false))
+                .child(params(s, accent, PAD_SMALL))
+                .child(modes(s, 2))
+                .child(events(s, accent))
+                .child(scenarios(s, accent))
+                .child(log(s, 6)),
+        ))
+}
+
+/// The same transport as the top bar, big, where the listening happens.
+fn play_button(s: &App, accent: Color) -> El {
+    row()
+        .key("playtest-play")
+        .role("button")
+        .label(if s.playing { "Stop" } else { "Play" })
+        .size(64.0, 64.0)
+        .center()
+        .radius(32.0)
+        .fill(if s.playing { accent } else { theme::card_hi() })
+        .hover(theme::hover())
+        .press_scale(0.94)
+        .motion(rune::tok::motion::SNAPPY)
+        .on_press(App::toggle_play)
+        .child(
+            text(if s.playing { "■" } else { "▶" })
+                .font(rune::TextStyle::new(22.0, 700.0))
+                .color(if s.playing {
+                    theme::bg()
+                } else {
+                    theme::text()
+                }),
         )
 }
 
-/// The full Simulator screen.
+/// The full Playtest screen.
 pub fn view(s: &App, accent: Color) -> El {
     let left = col()
         .gap(16.0)
@@ -47,7 +64,13 @@ pub fn view(s: &App, accent: Color) -> El {
         .grow(1.0)
         .min_w(0.0)
         .gap(18.0)
-        .child(now_playing(s, accent))
+        .child(
+            row()
+                .gap(16.0)
+                .items_center()
+                .child(play_button(s, accent))
+                .child(now_playing(s, accent)),
+        )
         .child(modes(s, 4))
         .child(events(s, accent))
         .child(engine_view(s, accent))
@@ -60,8 +83,8 @@ pub fn view(s: &App, accent: Color) -> El {
         .padding(22.0)
         .gap(16.0)
         .min_h(0.0)
-        .child(screen_header("Simulator", "The game without the game. Drag the pad, switch modes, fire events, or run a whole scenario.", accent))
-        .child(col().grow(1.0).min_h(0.0).scroll(rune::el::ScrollSpec { stick_bottom: false }).child(row().gap(28.0).items_start().child(left).child(right)))
+        .child(screen_header("Playtest", "Listen to the whole project the way the game will play it. Press Play, then be the game: switch modes, move the parameters, fire events, or run a scripted scenario.", accent))
+        .child(crate::widgets::vscroll(row().gap(28.0).items_start().child(left).child(right)))
 }
 
 fn now_playing(s: &App, accent: Color) -> El {
@@ -91,7 +114,7 @@ fn now_playing(s: &App, accent: Color) -> El {
     );
     c = c.child(
         text(
-            mode.map_or("Pick a mode below, then press Play".to_string(), |m| {
+            mode.map_or("No game mode yet: pick one below".to_string(), |m| {
                 m.about.clone()
             }),
         )
@@ -444,7 +467,7 @@ fn scenarios(s: &App, accent: Color) -> El {
                     )
                     .child(rune::spacer())
                     .child(if running {
-                        button(format!("scstop-{i}"), "■ Stop", accent, false)
+                        button(format!("scstop-{i}"), "■ Stop scenario", accent, false)
                             .on_press(actions::stop_scenario)
                     } else {
                         button(format!("scplay-{i}"), "▶ Run", accent, true)

@@ -30,12 +30,12 @@ pub use instrument::{
     zone_ranges,
 };
 pub use latency::{click_signal, latency_to_samples, measure_latency};
-pub use plan::{CapturePlan, PlannedTake, TimedMidi, ms_to_samples};
+pub use plan::{CapturePlan, PlannedTake, TimedMidi, clock_events, ms_to_samples};
 pub use session::{
     CaptureProgress, CaptureSession, InputChannel, NoteSender, Recording, list_input_devices,
 };
 pub use slice::{
-    CapturedNote, SILENT_TAKE_DB, TRIM_RANGE_DB, normalize_each, normalize_together,
+    CapturedNote, SILENT_TAKE_DB, TRIM_RANGE_DB, normalize_each, normalize_together, one_shot,
     slice_recording,
 };
 pub use wav::{load_wav, write_wav};

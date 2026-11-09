@@ -61,6 +61,41 @@ pub fn slice_recording(
     captured
 }
 
+/// One recording as a single sample: the first `skip_samples` (pre-roll and latency) are
+/// dropped, then it is trimmed of silence when `trim` is set (a microphone take), given short
+/// fades and brought up to `target_db`. `None` when it holds no sound. A loop recorded in time
+/// keeps its exact length with `trim` off.
+pub fn one_shot(
+    recording: &[f32],
+    sample_rate: u32,
+    skip_samples: usize,
+    trim: bool,
+    target_db: f32,
+) -> Option<CapturedNote> {
+    let body = recording.get(skip_samples.min(recording.len())..)?;
+    let peak = peak_db(body);
+    if body.is_empty() || peak < SILENT_TAKE_DB {
+        return None;
+    }
+    let range = if trim {
+        trim_silence(body, sample_rate, peak - TRIM_RANGE_DB)
+    } else {
+        0..body.len()
+    };
+    let mut samples = body.get(range)?.to_vec();
+    if samples.is_empty() {
+        return None;
+    }
+    apply_fades(&mut samples, sample_rate, FADE_IN_MS, FADE_OUT_MS);
+    normalize(&mut samples, target_db);
+    Some(CapturedNote {
+        note: 60,
+        velocity: 100,
+        sample_rate,
+        samples,
+    })
+}
+
 /// Normalizes all notes by one shared gain so the loudest peak lands at `target_db`.
 /// Soft velocities stay softer than hard ones. Returns the gain.
 pub fn normalize_together(notes: &mut [CapturedNote], target_db: f32) -> f32 {
@@ -205,5 +240,19 @@ mod tests {
         assert!((notes[0].samples[0] - 0.125).abs() < 1e-4);
         normalize_each(&mut notes, 0.0);
         assert!((notes[0].samples[0] - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_one_shot_drops_the_pre_roll_and_the_silence() {
+        let sr = 48_000;
+        let mut rec = vec![0.0f32; 4800];
+        rec.extend((0..9600).map(|i| 0.25 * (i as f32 * 0.05).sin()));
+        rec.extend(vec![0.0f32; 4800]);
+        let trimmed = one_shot(&rec, sr, 2400, true, -3.0).expect("sound");
+        assert!(trimmed.samples.len() < 9600 + 1200);
+        assert!((peak_db(&trimmed.samples) - -3.0).abs() < 0.5);
+        let whole = one_shot(&rec, sr, 2400, false, -3.0).expect("sound");
+        assert_eq!(whole.samples.len(), rec.len() - 2400);
+        assert!(one_shot(&vec![0.0; 9600], sr, 0, true, -3.0).is_none());
     }
 }
