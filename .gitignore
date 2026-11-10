@@ -4,3 +4,6 @@ Export/
 .DS_Store
 /*.wav
 /dist
+
+# Ignore all of .idea by default
+.idea/*
